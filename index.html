@@ -1,0 +1,880 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>serve-lib Project Overview</title>
+    <style>
+      :root {
+        --bg: #f6f7f9;
+        --ink: #182033;
+        --muted: #667085;
+        --line: #d7dde8;
+        --panel: #ffffff;
+        --panel-2: #eef2f7;
+        --blue: #1f5f99;
+        --green: #1d7f55;
+        --amber: #a66213;
+        --red: #aa3e3e;
+        --code: #172033;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        letter-spacing: 0;
+      }
+
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        background: rgba(255, 255, 255, 0.92);
+        border-bottom: 1px solid var(--line);
+        backdrop-filter: blur(14px);
+      }
+
+      .bar,
+      main {
+        width: min(1240px, calc(100% - 32px));
+        margin: 0 auto;
+      }
+
+      .bar {
+        min-height: 58px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .mark {
+        width: 34px;
+        height: 34px;
+        border-radius: 8px;
+        display: grid;
+        place-items: center;
+        color: #fff;
+        background: var(--ink);
+        font-weight: 800;
+      }
+
+      nav {
+        display: flex;
+        gap: 16px;
+        font-size: 13px;
+      }
+
+      nav a {
+        color: var(--muted);
+        text-decoration: none;
+      }
+
+      nav a:hover {
+        color: var(--ink);
+      }
+
+      main {
+        padding: 28px 0 56px;
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 0.95fr) minmax(440px, 1.05fr);
+        gap: 24px;
+        align-items: stretch;
+      }
+
+      .intro {
+        padding: 18px 0;
+      }
+
+      .eyebrow {
+        color: var(--blue);
+        font-size: 12px;
+        font-weight: 800;
+        text-transform: uppercase;
+        margin-bottom: 12px;
+      }
+
+      h1 {
+        margin: 0 0 16px;
+        font-size: 48px;
+        line-height: 1.04;
+        letter-spacing: 0;
+      }
+
+      .lead {
+        margin: 0;
+        max-width: 680px;
+        color: var(--muted);
+        font-size: 18px;
+        line-height: 1.58;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 22px;
+      }
+
+      .button {
+        display: inline-flex;
+        align-items: center;
+        min-height: 36px;
+        padding: 0 13px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        color: var(--ink);
+        font-size: 13px;
+        font-weight: 800;
+        text-decoration: none;
+      }
+
+      .button.primary {
+        background: var(--ink);
+        border-color: var(--ink);
+        color: #fff;
+      }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 24px;
+      }
+
+      .metric,
+      .panel,
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+
+      .metric {
+        padding: 13px;
+      }
+
+      .metric strong {
+        display: block;
+        font-size: 22px;
+      }
+
+      .metric span {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .panel {
+        overflow: hidden;
+      }
+
+      .panel-head {
+        min-height: 44px;
+        border-bottom: 1px solid var(--line);
+        padding: 0 14px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .panel-title {
+        font-weight: 800;
+        font-size: 14px;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 999px;
+        padding: 5px 9px;
+        font-size: 12px;
+        font-weight: 800;
+        background: var(--panel-2);
+        color: var(--muted);
+        white-space: nowrap;
+      }
+
+      .badge.done {
+        background: #ddf3e7;
+        color: var(--green);
+      }
+
+      .badge.next {
+        background: #fff0d6;
+        color: var(--amber);
+      }
+
+      .badge.later {
+        background: #f0edf8;
+        color: #63509b;
+      }
+
+      .module-list {
+        padding: 10px 14px 14px;
+      }
+
+      .module {
+        display: grid;
+        grid-template-columns: 150px minmax(0, 1fr) auto;
+        gap: 12px;
+        padding: 12px 0;
+        border-bottom: 1px solid var(--line);
+        align-items: start;
+      }
+
+      .module:last-child {
+        border-bottom: 0;
+      }
+
+      code,
+      pre {
+        font-family:
+          "SFMono-Regular", ui-monospace, Menlo, Consolas, "Liberation Mono",
+          monospace;
+      }
+
+      code {
+        color: var(--code);
+        font-size: 12px;
+      }
+
+      .module p {
+        margin: 2px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .section {
+        margin-top: 32px;
+      }
+
+      .section h2 {
+        margin: 0 0 14px;
+        font-size: 27px;
+        letter-spacing: 0;
+      }
+
+      .grid-3 {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .grid-2 {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .card {
+        padding: 16px;
+        min-height: 156px;
+      }
+
+      .card h3 {
+        margin: 0 0 8px;
+        font-size: 16px;
+      }
+
+      .card p,
+      .card li {
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.5;
+      }
+
+      .card ul {
+        margin: 10px 0 0;
+        padding-left: 18px;
+      }
+
+      .card pre {
+        margin: 12px 0 0;
+        white-space: pre-wrap;
+      }
+
+      .doc-list {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .doc-link {
+        display: block;
+        padding: 14px;
+        min-height: 96px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--ink);
+        text-decoration: none;
+      }
+
+      .doc-link strong {
+        display: block;
+        margin-bottom: 6px;
+      }
+
+      .doc-link span {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .diagram {
+        background: #172033;
+        color: #dce7f7;
+        border-radius: 8px;
+        overflow-x: auto;
+        padding: 18px;
+        line-height: 1.45;
+        font-size: 13px;
+      }
+
+      .timeline {
+        display: grid;
+        gap: 10px;
+      }
+
+      .step {
+        display: grid;
+        grid-template-columns: 110px minmax(0, 1fr) 100px;
+        gap: 14px;
+        align-items: center;
+        min-height: 54px;
+        padding: 12px 14px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+
+      .step p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .table {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: 180px 1fr 130px;
+        gap: 14px;
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--line);
+        font-size: 14px;
+      }
+
+      .row:last-child {
+        border-bottom: 0;
+      }
+
+      .row.header {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 800;
+        text-transform: uppercase;
+        background: #f9fafc;
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+
+      @media (max-width: 980px) {
+        nav {
+          display: none;
+        }
+
+        .hero,
+        .grid-2,
+        .grid-3,
+        .doc-list {
+          grid-template-columns: 1fr;
+        }
+
+        h1 {
+          font-size: 38px;
+        }
+      }
+
+      @media (max-width: 680px) {
+        .bar,
+        main {
+          width: min(100% - 22px, 1240px);
+        }
+
+        .metrics {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .module,
+        .step,
+        .row {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="bar">
+        <div class="brand">
+          <div class="mark">SL</div>
+          <div>
+            <strong>serve-lib</strong>
+            <span class="muted">user and agent guide</span>
+          </div>
+        </div>
+        <nav>
+          <a href="#workflow">Workflow</a>
+          <a href="#architecture">Architecture</a>
+          <a href="#progress">Progress</a>
+          <a href="#docs">Docs</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="intro">
+          <div class="eyebrow">Current State</div>
+          <h1>A private-network file server controlled by a daemon.</h1>
+          <p class="lead">
+            serve-lib lets users register local files and directories once,
+            then let a background daemon serve them on Tailscale or another
+            private interface. Today an experimental daemon, CLI, HTTP listener,
+            control API, events, timeout scheduler, and rustls-backed TLS/mTLS
+            sockets exist.
+          </p>
+          <div class="actions">
+            <a class="button primary" href="docs/codelabs.md">Open Codelabs</a>
+            <a class="button" href="docs/implementation-plan.md">Implementation Plan</a>
+            <a class="button" href="docs/tasks.md">Task List</a>
+          </div>
+          <div class="metrics">
+            <div class="metric">
+              <strong>51</strong>
+              <span>unit tests passing</span>
+            </div>
+            <div class="metric">
+              <strong>3</strong>
+              <span>workspace crates</span>
+            </div>
+            <div class="metric">
+              <strong>10</strong>
+              <span>milestones completed</span>
+            </div>
+            <div class="metric">
+              <strong>1</strong>
+              <span>Docker CLI/daemon e2e</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <span class="panel-title">What exists in code today</span>
+            <span class="badge done">runtime MVP</span>
+          </div>
+          <div class="module-list">
+            <div class="module">
+              <code>bind.rs</code>
+              <p>Parses logical bind targets: tailscale, private, loopback, any, IP, interface name.</p>
+              <span class="badge done">done</span>
+            </div>
+            <div class="module">
+              <code>config.rs</code>
+              <p>Parses local TOML config, defaults, profiles, event log settings, and register overrides.</p>
+              <span class="badge done">done</span>
+            </div>
+            <div class="module">
+              <code>registry.rs</code>
+              <p>Tracks route mounts by listener, rejects duplicate routes, and does longest-prefix matching.</p>
+              <span class="badge done">done</span>
+            </div>
+            <div class="module">
+              <code>static_files.rs</code>
+              <p>Plans file serving safely: traversal checks, symlink escape rejection, index.html, listing, SPA fallback, render modes.</p>
+              <span class="badge done">done</span>
+            </div>
+            <div class="module">
+              <code>events.rs</code>
+              <p>SQLite event store with migration, append, query filters, access events, lifecycle events, TTL cleanup.</p>
+              <span class="badge done">done</span>
+            </div>
+            <div class="module">
+              <code>duration.rs</code>
+              <p>Parses duration strings such as 30s, 10m, 2h, 1d and serializes them for config.</p>
+              <span class="badge done">done</span>
+            </div>
+            <div class="module">
+              <code>serve-lib-daemon</code>
+              <p>Runs HTTP listeners, private control API, event log, cleanup worker, and timeout scheduler.</p>
+              <span class="badge done">done</span>
+            </div>
+            <div class="module">
+              <code>serve-lib</code>
+              <p>CLI for daemon run/start/stop/status, register, deregister, list, and events.</p>
+              <span class="badge done">done</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section grid-3">
+        <div class="card">
+          <h3>Available Today</h3>
+          <ul>
+            <li>Rust core crate</li>
+            <li>experimental daemon and CLI</li>
+            <li>private HTTP JSON control API</li>
+            <li>HTTP listener runtime</li>
+            <li>config/default/profile parsing</li>
+            <li>Markdown rendering and code highlighting</li>
+            <li>route registry and conflict checks</li>
+            <li>static file planning and path safety</li>
+            <li>SQLite event store and TTL cleanup worker</li>
+            <li>Tailscale/private bind resolver primitives</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Still Pending</h3>
+          <ul>
+            <li>config file mutation commands</li>
+            <li>TLS/mTLS profile schema and config commands</li>
+            <li>runtime network-interface discovery wiring</li>
+            <li>TLS/mTLS browser/curl documentation</li>
+            <li>production daemon supervision and lock file</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Read First</h3>
+          <p>
+            Humans should start with the codelabs. Agents should read the
+            codelabs, tasks, and implementation plan before editing.
+          </p>
+          <pre><code>docs/codelabs.md
+docs/tasks.md
+docs/implementation-plan.md</code></pre>
+        </div>
+      </section>
+
+      <section class="section" id="workflow">
+        <h2>User Workflow Preview</h2>
+        <div class="grid-3">
+          <div class="card">
+            <h3>Start Daemon</h3>
+            <p>
+              Run the experimental daemon on a private local control API. The
+              serving listeners are opened only when paths are registered.
+            </p>
+            <pre><code>target/release/serve-lib --control 127.0.0.1:7878 daemon run</code></pre>
+          </div>
+          <div class="card">
+            <h3>Register Paths</h3>
+            <p>
+              A single daemon-owned port can expose multiple local directories
+              or files under different URL subpaths.
+            </p>
+            <pre><code>target/release/serve-lib --control 127.0.0.1:7878 register ./dist --route /app --port 8088 --bind loopback
+target/release/serve-lib --control 127.0.0.1:7878 register ./logs --route /logs --port 8088 --bind loopback
+target/release/serve-lib --control 127.0.0.1:7878 list</code></pre>
+          </div>
+          <div class="card">
+            <h3>Audit Activity</h3>
+            <p>
+              SQLite events should let users inspect what was registered, who
+              accessed it, and when old records were cleaned up.
+            </p>
+            <pre><code>target/release/serve-lib --control 127.0.0.1:7878 events
+target/release/serve-lib --control 127.0.0.1:7878 daemon stop</code></pre>
+          </div>
+        </div>
+        <p class="muted">
+          These commands use the experimental CLI. For full human and agent
+          continuation steps, see <a href="docs/codelabs.md">docs/codelabs.md</a>.
+        </p>
+      </section>
+
+      <section class="section" id="architecture">
+        <h2>Architecture</h2>
+        <pre class="diagram"><code>User CLI
+  |
+  | register ./dist --route /app
+  v
+Config Resolver
+  |  defaults/profile/overrides
+  v
+Control API Client  ---- private HTTP JSON ---->  Background Daemon
+                                             |
+                                             | owns runtime state
+                                             v
+                                      Registry Manager
+                                             |
+                          +------------------+------------------+
+                          |                                     |
+                   Listener Manager                      Timeout Scheduler
+                          |                                     |
+                 bind+port HTTP server                  expire registrations
+                          |
+                          v
+                    Route Router
+                          |
+                          v
+                 Static File Service
+                          |
+                          v
+                 SQLite Event Log</code></pre>
+      </section>
+
+      <section class="section grid-3">
+        <div class="card">
+          <h3>Control Plane</h3>
+          <p>
+            The CLI is short-lived. It builds register/deregister/list requests
+            and sends them to the daemon over a private HTTP JSON control API.
+            Config mutation commands are still pending.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Data Plane</h3>
+          <p>
+            The daemon owns listeners and serves HTTP traffic. Static file
+            planning, path safety, directory listing, and SPA fallback are
+            reusable core behavior.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Event Plane</h3>
+          <p>
+            SQLite records route lifecycle and access events. Retention is TTL
+            based, not max-row-count based. A background cleanup worker exists
+            in the runtime.
+          </p>
+        </div>
+      </section>
+
+      <section class="section" id="progress">
+        <h2>Implementation Timeline</h2>
+        <div class="timeline">
+          <div class="step">
+            <strong>Milestone 0-1</strong>
+            <p>Workspace scaffold, shared DTOs, error model, bind target and duration parsing.</p>
+            <span class="badge done">complete</span>
+          </div>
+          <div class="step">
+            <strong>Milestone 2</strong>
+            <p>Config schema, default/profile merging, event log config validation.</p>
+            <span class="badge done">complete</span>
+          </div>
+          <div class="step">
+            <strong>Milestone 3</strong>
+            <p>Registry with listener grouping, route conflict checks, and longest-prefix matching.</p>
+            <span class="badge done">complete</span>
+          </div>
+          <div class="step">
+            <strong>Milestone 4</strong>
+            <p>Static file service planning with index.html, directory listing, SPA fallback, traversal protection.</p>
+            <span class="badge done">complete</span>
+          </div>
+          <div class="step">
+            <strong>Milestone 5</strong>
+            <p>SQLite event log store, lifecycle/access events, filters, and TTL cleanup API.</p>
+            <span class="badge done">complete</span>
+          </div>
+          <div class="step">
+            <strong>Milestone 6</strong>
+            <p>Bind resolver for Tailscale/private/interface targets, tested with mocked command output.</p>
+            <span class="badge done">complete</span>
+          </div>
+          <div class="step">
+            <strong>Milestone 7</strong>
+            <p>Listener manager and HTTP router with access events and empty-listener shutdown.</p>
+            <span class="badge done">complete</span>
+          </div>
+          <div class="step">
+            <strong>Milestone 8</strong>
+            <p>Timeout scheduler expires routes, removes them, and records route_expired events.</p>
+            <span class="badge done">complete</span>
+          </div>
+          <div class="step">
+            <strong>Milestone 10-11</strong>
+            <p>Daemon runtime, private control API, and experimental CLI commands.</p>
+            <span class="badge done">complete</span>
+          </div>
+          <div class="step">
+            <strong>TLS/mTLS</strong>
+            <p>rustls-backed TLS and mTLS socket acceptance with manually configured certificates.</p>
+            <span class="badge done">complete</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="section grid-2">
+        <div>
+          <h2>Module Map</h2>
+          <div class="table">
+            <div class="row header">
+              <span>File</span>
+              <span>Why it exists</span>
+              <span>Status</span>
+            </div>
+            <div class="row">
+              <code>types.rs</code>
+              <span>Shared DTOs: mount id, listener key, route mount, register/deregister requests.</span>
+              <span class="badge done">core</span>
+            </div>
+            <div class="row">
+              <code>error.rs</code>
+              <span>Stable error codes and user-facing error variants.</span>
+              <span class="badge done">core</span>
+            </div>
+            <div class="row">
+              <code>route.rs</code>
+              <span>Normalizes route prefixes and checks route boundaries.</span>
+              <span class="badge done">core</span>
+            </div>
+            <div class="row">
+              <code>config.rs</code>
+              <span>Local config schema and effective register defaults.</span>
+              <span class="badge done">core</span>
+            </div>
+            <div class="row">
+              <code>events.rs</code>
+              <span>SQLite event history and TTL cleanup primitives.</span>
+              <span class="badge done">core</span>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <h2>What Is Not Built Yet</h2>
+          <div class="table">
+            <div class="row header">
+              <span>Component</span>
+              <span>What remains</span>
+              <span>Status</span>
+            </div>
+            <div class="row">
+              <strong>Daemon</strong>
+              <span>Runtime loop, detached start, shutdown, listeners, events, and timeout scheduler.</span>
+              <span class="badge done">mvp</span>
+            </div>
+            <div class="row">
+              <strong>HTTP Listener</strong>
+              <span>Server sockets, request routing, static file serving, and directory listings.</span>
+              <span class="badge done">mvp</span>
+            </div>
+            <div class="row">
+              <strong>CLI</strong>
+              <span>Daemon run/start/stop/status, register, deregister, list, and events.</span>
+              <span class="badge done">mvp</span>
+            </div>
+            <div class="row">
+              <strong>mTLS Runtime</strong>
+              <span>rustls-backed serving with server cert/key and optional client CA verification.</span>
+              <span class="badge done">mvp</span>
+            </div>
+            <div class="row">
+              <strong>Timeout Worker</strong>
+              <span>Background expiry task that deregisters old routes.</span>
+              <span class="badge done">mvp</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section grid-3">
+        <div class="card">
+          <h3>Config Example</h3>
+          <pre><code>[defaults]
+bind = "tailscale"
+port = 8088
+timeout = "2h"
+index = "index.html"
+spa = false
+
+[event_log]
+retention = "7d"
+cleanup_interval = "1h"</code></pre>
+        </div>
+        <div class="card">
+          <h3>SQLite Events</h3>
+          <ul>
+            <li>register / deregister / expired</li>
+            <li>HTTP served / denied / not found / error</li>
+            <li>remote IP and status filters</li>
+            <li>TTL cleanup API</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Validation</h3>
+          <ul>
+            <li>51 unit tests passing</li>
+            <li>fmt, clippy, test, release build, docs</li>
+            <li>Docker e2e covers CLI/daemon multi-route, config/profile, SQLite retention, TLS, and mTLS flows</li>
+            <li>Markdown/code rendering enable and disable flows are covered</li>
+            <li>Route conflict and listener TLS policy conflict errors are covered</li>
+            <li>no real Tailscale hostname or IP in repo</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="section" id="docs">
+        <h2>Documentation</h2>
+        <div class="doc-list">
+          <a class="doc-link" href="docs/codelabs.md">
+            <strong>Codelabs</strong>
+            <span>Human and agent workflows, current checks, and experimental CLI usage.</span>
+          </a>
+          <a class="doc-link" href="docs/feature-requirements.md">
+            <strong>Requirements</strong>
+            <span>Product model, daemon behavior, config, events, and TLS/mTLS goals.</span>
+          </a>
+          <a class="doc-link" href="docs/architecture.md">
+            <strong>Architecture</strong>
+            <span>Process model and component boundaries for the daemon-backed system.</span>
+          </a>
+          <a class="doc-link" href="docs/design.md">
+            <strong>Component Design</strong>
+            <span>Detailed component responsibilities and interfaces.</span>
+          </a>
+          <a class="doc-link" href="docs/implementation-plan.md">
+            <strong>Implementation Plan</strong>
+            <span>Milestones, acceptance criteria, and next implementation order.</span>
+          </a>
+          <a class="doc-link" href="docs/tasks.md">
+            <strong>Tasks</strong>
+            <span>Current completed and pending work for users and future agents.</span>
+          </a>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

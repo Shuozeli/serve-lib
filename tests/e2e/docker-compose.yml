@@ -1,0 +1,8 @@
+services:
+  core-e2e:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+    environment:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"

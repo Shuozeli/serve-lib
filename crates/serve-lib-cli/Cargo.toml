@@ -1,0 +1,16 @@
+[package]
+name = "serve-lib-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "serve-lib"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+serve-lib-core = { path = "../serve-lib-core" }
+serve-lib-daemon = { path = "../serve-lib-daemon" }
