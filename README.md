@@ -75,5 +75,6 @@ that CA.
 - [Architecture](docs/architecture.md)
 - [Component design](docs/design.md)
 - [Codelabs](docs/codelabs.md)
+- [Agent guide](docs/agent-guide.md)
 - [Implementation plan](docs/implementation-plan.md)
 - [Tasks](docs/tasks.md)
