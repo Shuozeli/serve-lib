@@ -5,9 +5,18 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
+
+use syntect::highlighting::ThemeSet;
+use syntect::parsing::SyntaxSet;
+
+static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
+
+const HTTP_READ_BUFFER: usize = 8192;
+const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
@@ -99,8 +108,8 @@ impl DaemonRuntime {
             EventKind::DaemonStarted,
             "daemon runtime started",
         ));
-        runtime.start_timeout_scheduler();
-        runtime.start_cleanup_worker();
+        runtime.start_timeout_scheduler()?;
+        runtime.start_cleanup_worker()?;
         Ok(runtime)
     }
 
@@ -308,7 +317,7 @@ impl DaemonRuntime {
         }
     }
 
-    fn start_timeout_scheduler(&self) {
+    fn start_timeout_scheduler(&self) -> Result<(), ServeError> {
         let state = Arc::clone(&self.state);
         let events = Arc::clone(&self.events);
         let shutdown = Arc::clone(&self.shutdown);
@@ -319,10 +328,14 @@ impl DaemonRuntime {
                 expire_routes(&state, &events);
             }
         });
-        *self.timeout_thread.lock().expect("timeout lock") = Some(thread);
+        *self
+            .timeout_thread
+            .lock()
+            .map_err(|_| ServeError::Internal("timeout lock poisoned".to_string()))? = Some(thread);
+        Ok(())
     }
 
-    fn start_cleanup_worker(&self) {
+    fn start_cleanup_worker(&self) -> Result<(), ServeError> {
         let events = Arc::clone(&self.events);
         let shutdown = Arc::clone(&self.shutdown);
         let retention = self.options.cleanup_retention;
@@ -331,16 +344,24 @@ impl DaemonRuntime {
             while !shutdown.load(Ordering::SeqCst) {
                 thread::sleep(interval);
                 if let Ok(store) = events.lock() {
-                    let _ = store.cleanup_older_than(SystemTime::now(), retention);
+                    if let Err(err) = store.cleanup_older_than(SystemTime::now(), retention) {
+                        eprintln!("serve-lib: event log cleanup failed: {err}");
+                    }
                 }
             }
         });
-        *self.cleanup_thread.lock().expect("cleanup lock") = Some(thread);
+        *self
+            .cleanup_thread
+            .lock()
+            .map_err(|_| ServeError::Internal("cleanup lock poisoned".to_string()))? = Some(thread);
+        Ok(())
     }
 
     fn append_event(&self, event: ServeEvent) {
         if let Ok(store) = self.events.lock() {
-            let _ = store.append(&event);
+            if let Err(err) = store.append(&event) {
+                eprintln!("serve-lib: event log write failed: {err}");
+            }
         }
     }
 
@@ -402,7 +423,7 @@ fn start_listener(
                     });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(25));
+                    thread::sleep(ACCEPT_POLL_INTERVAL);
                 }
                 Err(_) => break,
             }
@@ -532,7 +553,7 @@ fn handle_http_connection<S>(
 ) where
     S: Read + Write,
 {
-    let mut buffer = [0; 8192];
+    let mut buffer = [0; HTTP_READ_BUFFER];
     let Ok(read) = stream.read(&mut buffer) else {
         return;
     };
@@ -775,12 +796,10 @@ fn render_markdown_page(title: &str, source: &str) -> String {
 }
 
 fn render_code_page(title: &str, source: &str) -> String {
-    use syntect::highlighting::ThemeSet;
     use syntect::html::highlighted_html_for_string;
-    use syntect::parsing::SyntaxSet;
 
-    let syntax_set = SyntaxSet::load_defaults_newlines();
-    let theme_set = ThemeSet::load_defaults();
+    let syntax_set = SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines);
+    let theme_set = THEME_SET.get_or_init(ThemeSet::load_defaults);
     let syntax = std::path::Path::new(title)
         .extension()
         .and_then(|extension| extension.to_str())
@@ -793,7 +812,7 @@ fn render_code_page(title: &str, source: &str) -> String {
     else {
         return render_html_shell(title, &format!("<pre>{}</pre>", html_escape(source)));
     };
-    let highlighted = highlighted_html_for_string(source, &syntax_set, syntax, theme)
+    let highlighted = highlighted_html_for_string(source, syntax_set, syntax, theme)
         .unwrap_or_else(|_| format!("<pre>{}</pre>", html_escape(source)));
     render_html_shell(title, &highlighted)
 }
@@ -890,7 +909,9 @@ fn append_access_event(
 
 fn append_event(events: &Arc<Mutex<EventLogStore>>, event: ServeEvent) {
     if let Ok(store) = events.lock() {
-        let _ = store.append(&event);
+        if let Err(err) = store.append(&event) {
+            eprintln!("serve-lib: event log write failed: {err}");
+        }
     }
 }
 

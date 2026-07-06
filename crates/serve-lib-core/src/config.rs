@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{BindTarget, DurationSpec, RenderConfig, ServeError};
 
+pub const DEFAULT_PORT: u16 = 8088;
+const SECS_PER_WEEK: u64 = 7 * 24 * 60 * 60;
+const SECS_PER_HOUR: u64 = 60 * 60;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct LocalConfig {
@@ -62,7 +66,7 @@ impl LocalConfig {
             .port
             .or_else(|| profile.and_then(|profile| profile.port))
             .or(self.defaults.port)
-            .unwrap_or(8088);
+            .unwrap_or(DEFAULT_PORT);
 
         let timeout = overrides
             .timeout
@@ -148,8 +152,9 @@ impl Default for EventLogConfig {
     fn default() -> Self {
         Self {
             database_path: EventLogDatabasePath::Default,
-            retention: DurationSpec::from_seconds(7 * 24 * 60 * 60).expect("valid retention"),
-            cleanup_interval: DurationSpec::from_seconds(60 * 60).expect("valid cleanup interval"),
+            retention: DurationSpec::from_seconds(SECS_PER_WEEK).expect("valid retention"),
+            cleanup_interval: DurationSpec::from_seconds(SECS_PER_HOUR)
+                .expect("valid cleanup interval"),
         }
     }
 }

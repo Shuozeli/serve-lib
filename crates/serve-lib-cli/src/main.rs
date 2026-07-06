@@ -6,7 +6,7 @@ use std::sync::Arc;
 use clap::{ArgAction, Parser, Subcommand};
 use serve_lib_core::{
     BindTarget, DeregisterRequest, DurationSpec, EventLogDatabasePath, LocalConfig,
-    RegisterOverride, RegisterRequest, TlsMode, TlsPolicy,
+    RegisterOverride, RegisterRequest, TlsMode, TlsPolicy, DEFAULT_PORT,
 };
 use serve_lib_daemon::{
     run_control_server, ControlClient, ControlRequest, ControlResponse, DaemonRuntime,
@@ -76,7 +76,7 @@ enum Commands {
         #[arg(long)]
         route: String,
 
-        #[arg(long, default_value = "8088")]
+        #[arg(long, default_value_t = DEFAULT_PORT)]
         port: u16,
 
         #[arg(long)]

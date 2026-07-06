@@ -15,7 +15,7 @@ pub use bind::{
 };
 pub use config::{
     EffectiveRegisterDefaults, EventLogConfig, EventLogDatabasePath, LocalConfig, ProfileConfig,
-    RegisterOverride,
+    RegisterOverride, DEFAULT_PORT,
 };
 pub use duration::DurationSpec;
 pub use error::{ErrorCode, ServeError};

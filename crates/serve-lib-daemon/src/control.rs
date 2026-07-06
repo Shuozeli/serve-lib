@@ -4,6 +4,11 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+const CONTROL_READ_CHUNK: usize = 4096;
+/// Security-relevant cap: prevents a malicious client from filling heap with a single request.
+const CONTROL_MAX_REQUEST_BYTES: usize = 1024 * 1024;
+const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
 use serde::{Deserialize, Serialize};
 use serve_lib_core::{
     DeregisterRequest, EventQuery, EventRow, RegisterRequest, RegisterResponse, ServeError,
@@ -94,7 +99,7 @@ pub fn run_control_server(runtime: Arc<DaemonRuntime>, addr: SocketAddr) -> Resu
         match listener.accept() {
             Ok((stream, _)) => handle_control_connection(stream, Arc::clone(&runtime)),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(25));
+                thread::sleep(ACCEPT_POLL_INTERVAL);
             }
             Err(error) => return Err(ServeError::DaemonUnavailable(error.to_string())),
         }
@@ -183,7 +188,7 @@ fn route_control_request(
 
 fn read_http_request(stream: &mut TcpStream) -> Result<(String, String, Vec<u8>), ServeError> {
     let mut buffer = Vec::new();
-    let mut chunk = [0; 4096];
+    let mut chunk = [0; CONTROL_READ_CHUNK];
     loop {
         let read = stream
             .read(&mut chunk)
@@ -195,7 +200,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<(String, String, Vec<u8>)
         if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
             break;
         }
-        if buffer.len() > 1024 * 1024 {
+        if buffer.len() > CONTROL_MAX_REQUEST_BYTES {
             return Err(ServeError::InvalidRequest(
                 "control request is too large".to_string(),
             ));

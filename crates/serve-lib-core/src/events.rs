@@ -202,24 +202,33 @@ pub enum EventKind {
     ServeError,
 }
 
+/// Single source of truth for EventKind ↔ string mappings.
+/// Both `as_str` and `FromStr` derive from this table so adding a new variant
+/// only requires one entry here.
+static KIND_TABLE: &[(&str, EventKind)] = &[
+    ("daemon_started", EventKind::DaemonStarted),
+    ("daemon_stopped", EventKind::DaemonStopped),
+    ("listener_opened", EventKind::ListenerOpened),
+    ("listener_closed", EventKind::ListenerClosed),
+    ("route_registered", EventKind::RouteRegistered),
+    ("route_deregistered", EventKind::RouteDeregistered),
+    ("route_expired", EventKind::RouteExpired),
+    ("http_access_served", EventKind::HttpAccessServed),
+    ("http_access_denied", EventKind::HttpAccessDenied),
+    ("http_not_found", EventKind::HttpNotFound),
+    ("http_serve_error", EventKind::HttpServeError),
+    ("bind_resolution_failed", EventKind::BindResolutionFailed),
+    ("serve_denied", EventKind::ServeDenied),
+    ("serve_error", EventKind::ServeError),
+];
+
 impl EventKind {
     pub fn as_str(self) -> &'static str {
-        match self {
-            EventKind::DaemonStarted => "daemon_started",
-            EventKind::DaemonStopped => "daemon_stopped",
-            EventKind::ListenerOpened => "listener_opened",
-            EventKind::ListenerClosed => "listener_closed",
-            EventKind::RouteRegistered => "route_registered",
-            EventKind::RouteDeregistered => "route_deregistered",
-            EventKind::RouteExpired => "route_expired",
-            EventKind::HttpAccessServed => "http_access_served",
-            EventKind::HttpAccessDenied => "http_access_denied",
-            EventKind::HttpNotFound => "http_not_found",
-            EventKind::HttpServeError => "http_serve_error",
-            EventKind::BindResolutionFailed => "bind_resolution_failed",
-            EventKind::ServeDenied => "serve_denied",
-            EventKind::ServeError => "serve_error",
-        }
+        KIND_TABLE
+            .iter()
+            .find(|(_, kind)| *kind == self)
+            .map(|(s, _)| *s)
+            .expect("all EventKind variants are present in KIND_TABLE")
     }
 }
 
@@ -227,25 +236,11 @@ impl FromStr for EventKind {
     type Err = ServeError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "daemon_started" => Ok(EventKind::DaemonStarted),
-            "daemon_stopped" => Ok(EventKind::DaemonStopped),
-            "listener_opened" => Ok(EventKind::ListenerOpened),
-            "listener_closed" => Ok(EventKind::ListenerClosed),
-            "route_registered" => Ok(EventKind::RouteRegistered),
-            "route_deregistered" => Ok(EventKind::RouteDeregistered),
-            "route_expired" => Ok(EventKind::RouteExpired),
-            "http_access_served" => Ok(EventKind::HttpAccessServed),
-            "http_access_denied" => Ok(EventKind::HttpAccessDenied),
-            "http_not_found" => Ok(EventKind::HttpNotFound),
-            "http_serve_error" => Ok(EventKind::HttpServeError),
-            "bind_resolution_failed" => Ok(EventKind::BindResolutionFailed),
-            "serve_denied" => Ok(EventKind::ServeDenied),
-            "serve_error" => Ok(EventKind::ServeError),
-            _ => Err(ServeError::EventLogUnavailable(format!(
-                "unknown event kind: {value}"
-            ))),
-        }
+        KIND_TABLE
+            .iter()
+            .find(|(s, _)| *s == value)
+            .map(|(_, kind)| *kind)
+            .ok_or_else(|| ServeError::EventLogUnavailable(format!("unknown event kind: {value}")))
     }
 }
 

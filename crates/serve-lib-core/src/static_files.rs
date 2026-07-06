@@ -21,11 +21,6 @@ impl StaticFileService {
 fn plan_resolved_path(mount: &RouteMount, target: PathBuf) -> ServeOutcome {
     match fs::metadata(&target) {
         Ok(metadata) if metadata.is_file() => {
-            if !is_inside_root(&mount.local_root, &target) {
-                return ServeOutcome::Forbidden {
-                    reason: "path escapes mount root".to_string(),
-                };
-            }
             let content_type = content_type_for_path(&target).to_string();
             let render_mode = render_mode_for_path(mount, &target);
             ServeOutcome::File(ServeFilePlan {
@@ -37,19 +32,15 @@ fn plan_resolved_path(mount: &RouteMount, target: PathBuf) -> ServeOutcome {
             })
         }
         Ok(metadata) if metadata.is_dir() => {
-            if !is_inside_root(&mount.local_root, &target) {
-                return ServeOutcome::Forbidden {
-                    reason: "path escapes mount root".to_string(),
-                };
-            }
             let index_path = target.join(&mount.index_file);
             if let Ok(index_metadata) = fs::metadata(&index_path) {
+                // index_path is constructed locally and not validated by resolve_under_root,
+                // so we must check it stays inside the root before serving it.
                 if index_metadata.is_file() && is_inside_root(&mount.local_root, &index_path) {
                     return ServeOutcome::File(ServeFilePlan {
-                        path: index_path,
-                        content_type: content_type_for_path(&target.join(&mount.index_file))
-                            .to_string(),
-                        render_mode: render_mode_for_path(mount, &target.join(&mount.index_file)),
+                        path: index_path.clone(),
+                        content_type: content_type_for_path(&index_path).to_string(),
+                        render_mode: render_mode_for_path(mount, &index_path),
                         len: index_metadata.len(),
                         modified: index_metadata.modified().ok(),
                     });
