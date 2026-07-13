@@ -187,6 +187,7 @@ serve-lib-cli
 serve-lib-daemon
   - daemon lifecycle
   - control API server
+  - state controller
   - registry manager
   - listener manager
   - timeout scheduler
@@ -288,30 +289,162 @@ The event log should record enough information to answer:
 
 Access logging should avoid storing query strings by default. Future versions can expose explicit opt-in query logging if needed.
 
+## Runtime State Source Of Truth
+
+The daemon needs one explicit source of truth for active serving state. Treat it
+as a state machine owned by a state controller, not as several components that
+mutate each other independently.
+
+Authoritative state:
+
+```text
+DaemonState {
+  mounts: active route mounts by mount id and listener key,
+  listener_policies: TLS/mTLS policy by listener key,
+  generation: monotonically increasing state version
+}
+```
+
+Derived runtime state:
+
+```text
+running listeners     = derived from DaemonState.mounts listener keys
+route router snapshots = derived from DaemonState.mounts per listener
+timeout watches       = derived from mounts with expires_at
+status/list output    = derived from DaemonState
+```
+
+Audit state:
+
+```text
+event log = append-only history of state transitions and HTTP access
+```
+
+The event log is not the source of truth for active routes. It records what
+happened. The in-memory daemon state decides what is currently served. A future
+persistent registry can replay or store snapshots, but that persistence layer
+must hydrate `DaemonState` before listeners start rather than bypassing the
+state controller.
+
+### State Controller
+
+All mutations to active serving state should go through one controller:
+
+```text
+Control API / Timeout Scheduler
+  |
+  v
+State Controller
+  |
+  +-- validate transition
+  +-- update DaemonState
+  +-- reconcile derived runtime state
+  +-- append lifecycle event
+  v
+Runtime snapshot
+```
+
+The controller owns transition ordering. Registry, listener manager, timeout
+scheduler, and event log store are collaborators; they should not each define
+their own register/deregister workflow.
+
+### State Machine
+
+Each mount follows a small lifecycle:
+
+```text
+Requested
+  -> Active
+  -> Removing
+  -> Removed
+
+Requested
+  -> Rejected
+
+Active
+  -> Expiring
+  -> Removed
+
+Active
+  -> Failed
+  -> Removed
+```
+
+Mount state meanings:
+
+- `Requested`: validation and bind resolution are in progress.
+- `Active`: the mount is part of the authoritative route table and can serve
+  traffic when its listener is running.
+- `Removing`: explicit deregistration has started.
+- `Expiring`: timeout-driven deregistration has started.
+- `Removed`: the mount is no longer served and no longer appears in list output.
+- `Rejected`: registration failed before becoming active.
+- `Failed`: the mount was active but had to be removed because a required
+  derived runtime resource could not be maintained.
+
+Listener state is derived from active mounts:
+
+```text
+NoRoutes
+  -> Starting
+  -> Running
+  -> Draining
+  -> Stopped
+
+Starting
+  -> Failed
+```
+
+A listener should run only when at least one active mount references its
+listener key. When the last mount is removed, the listener transitions through
+draining to stopped.
+
+### State Versioning
+
+Every successful state mutation should increment a `generation` value. Request
+handlers should operate on an immutable snapshot tagged with the generation
+they observed. This gives diagnostics a clear answer to "which state handled
+this request?" and prevents a request from observing a partially-applied
+register or deregister transition.
+
+The first implementation can keep snapshots simple by cloning route tables for
+listener handlers. Later versions can optimize with `Arc` snapshots if route
+tables grow.
+
 ## Listener Reconciliation
 
-The daemon should treat listeners as derived state from the registry.
+The daemon should treat listeners as derived state from the state controller's
+authoritative `DaemonState`.
 
 On register:
 
-1. Add the route to the registry.
-2. If no listener exists for the listener key, open one.
-3. If a listener exists, verify the requested TLS policy matches the existing listener policy.
-4. Attach or update that listener's route router.
-5. Record a `route_registered` event.
+1. Validate the requested transition.
+2. Verify the requested TLS policy matches any existing listener policy.
+3. Add the route to `DaemonState`.
+4. Increment the state generation.
+5. Reconcile listener and timeout derived state.
+6. Record a `route_registered` event.
 
 On deregister:
 
-1. Remove the route from the registry.
-2. Update the listener's router.
-3. If no routes remain for the listener key, close the listener.
-4. Record a `route_deregistered` event.
+1. Validate the route exists in `DaemonState`.
+2. Remove the route through the state controller.
+3. Increment the state generation.
+4. Reconcile listener and timeout derived state.
+5. If no routes remain for the listener key, close the listener.
+6. Record a `route_deregistered` event.
 
 On timeout expiry:
 
-1. Mark the route expired.
-2. Deregister it through the same path as explicit deregistration.
-3. Record a `route_expired` event.
+1. Mark the route expiring through the state controller.
+2. Remove it through the same state transition used by explicit deregistration.
+3. Increment the state generation.
+4. Reconcile listener and timeout derived state.
+5. Record a `route_expired` event.
+
+If a derived action fails after an authoritative mutation, the controller must
+either roll back to the previous generation or transition affected mounts to
+`Failed` and reconcile again. Silent partial state is not allowed.
 
 ## Failure Boundaries
 

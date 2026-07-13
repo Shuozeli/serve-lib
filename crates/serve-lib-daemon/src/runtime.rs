@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::BufReader;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,9 +25,11 @@ use serde::{Deserialize, Serialize};
 use serve_lib_core::{
     BindResolver, DeregisterRequest, DeregisterResponse, DirectoryEntryKind, EventKind,
     EventLogStore, EventQuery, EventRow, ListenerKey, MountId, RegisterRequest, RegisterResponse,
-    Registry, RenderMode, RouteMount, ServeError, ServeEvent, ServeOutcome, StaticFileService,
+    RenderMode, RouteMount, ServeError, ServeEvent, ServeOutcome, StaticFileService,
     SystemCommandRunner, TlsPolicy,
 };
+
+use crate::state::StateController;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeOptions {
@@ -52,6 +54,7 @@ impl Default for RuntimeOptions {
 pub struct DaemonStatus {
     pub mounts: usize,
     pub listeners: usize,
+    pub generation: u64,
     pub tls_runtime: String,
 }
 
@@ -74,9 +77,8 @@ struct ListenerHandle {
 
 #[derive(Debug, Default)]
 struct RuntimeState {
-    registry: Registry,
+    controller: StateController,
     listeners: BTreeMap<ListenerKey, ListenerHandle>,
-    tls_policies: BTreeMap<ListenerKey, TlsPolicy>,
 }
 
 #[derive(Debug)]
@@ -146,14 +148,9 @@ impl DaemonRuntime {
         };
 
         let mut state = self.lock_state()?;
-        if let Some(existing) = state.tls_policies.get(&listener) {
-            if existing != &tls_policy {
-                return Err(ServeError::InvalidConfig(format!(
-                    "listener {}:{} already has a different TLS policy",
-                    listener.bind_addr, listener.port
-                )));
-            }
-        }
+        state
+            .controller
+            .validate_listener_policy(&listener, &tls_policy)?;
 
         let started_listener = if state.listeners.contains_key(&listener) {
             false
@@ -165,13 +162,13 @@ impl DaemonRuntime {
                 Arc::clone(&self.events),
             )?;
             state.listeners.insert(listener.clone(), handle);
-            state
-                .tls_policies
-                .insert(listener.clone(), tls_policy.clone());
             true
         };
 
-        if let Err(error) = state.registry.insert(mount.clone()) {
+        if let Err(error) = state
+            .controller
+            .insert_mount(mount.clone(), tls_policy.clone())
+        {
             if started_listener {
                 stop_listener(&mut state, &listener);
             }
@@ -209,10 +206,10 @@ impl DaemonRuntime {
     pub fn deregister(&self, request: DeregisterRequest) -> Result<DeregisterResponse, ServeError> {
         let listener = self.resolve_deregister_listener(&request)?;
         let mut state = self.lock_state()?;
-        let removed = state
-            .registry
+        let (removed, _) = state
+            .controller
             .remove_by_listener_route(&listener, &request.route)?;
-        if state.registry.is_listener_empty(&listener) {
+        if state.controller.is_listener_empty(&listener) {
             stop_listener(&mut state, &listener);
         }
         drop(state);
@@ -232,7 +229,7 @@ impl DaemonRuntime {
     pub fn list(&self) -> Result<Vec<ListMount>, ServeError> {
         let state = self.lock_state()?;
         Ok(state
-            .registry
+            .controller
             .mounts()
             .map(|mount| ListMount {
                 id: mount.id.to_string(),
@@ -249,8 +246,9 @@ impl DaemonRuntime {
     pub fn status(&self) -> Result<DaemonStatus, ServeError> {
         let state = self.lock_state()?;
         Ok(DaemonStatus {
-            mounts: state.registry.mounts().count(),
+            mounts: state.controller.mount_count(),
             listeners: state.listeners.len(),
+            generation: state.controller.generation().as_u64(),
             tls_runtime: "rustls".to_string(),
         })
     }
@@ -294,12 +292,12 @@ impl DaemonRuntime {
 
         let state = self.lock_state()?;
         let candidates = state
-            .registry
+            .controller
             .listener_keys()
             .filter(|listener| listener.port == request.port)
             .filter(|listener| {
                 state
-                    .registry
+                    .controller
                     .match_request(listener, request.route.as_str())
                     .is_some()
             })
@@ -541,7 +539,7 @@ fn stop_listener(state: &mut RuntimeState, listener: &ListenerKey) {
             let _ = thread.join();
         }
     }
-    state.tls_policies.remove(listener);
+    state.controller.remove_listener_policy(listener);
 }
 
 fn handle_http_connection<S>(
@@ -571,6 +569,11 @@ fn handle_http_connection<S>(
         .lines()
         .find_map(|line| line.strip_prefix("User-Agent: "))
         .map(ToString::to_string);
+    let range = request.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("Range")
+            .then(|| value.trim().to_string())
+    });
 
     if method != "GET" && method != "HEAD" {
         write_response(
@@ -607,7 +610,7 @@ fn handle_http_connection<S>(
             return;
         };
         state
-            .registry
+            .controller
             .match_request(&listener, path)
             .map(|matched| (matched.mount.clone(), matched.relative_path))
     };
@@ -636,14 +639,15 @@ fn handle_http_connection<S>(
     };
 
     match StaticFileService::plan(&mount, &relative_path) {
-        ServeOutcome::File(file) => match read_file_response(&file) {
+        ServeOutcome::File(file) => match read_file_response(&file, range.as_deref()) {
             Ok(response) => {
                 let len = response.body.len() as u64;
-                write_response(
+                write_response_with_headers(
                     &mut stream,
-                    200,
+                    response.status,
                     &response.content_type,
                     &response.body,
+                    &response.extra_headers,
                     method == "HEAD",
                 );
                 append_access_event(
@@ -653,8 +657,30 @@ fn handle_http_connection<S>(
                     path,
                     Some(&mount),
                     Some(file.path),
-                    200,
+                    response.status,
                     len,
+                    remote_addr,
+                    user_agent,
+                );
+            }
+            Err(ReadFileError::UnsatisfiableRange { len }) => {
+                write_response_with_headers(
+                    &mut stream,
+                    416,
+                    "text/plain; charset=utf-8",
+                    b"range not satisfiable",
+                    &[("Content-Range".to_string(), format!("bytes */{len}"))],
+                    method == "HEAD",
+                );
+                append_access_event(
+                    &events,
+                    EventKind::HttpAccessDenied,
+                    method,
+                    path,
+                    Some(&mount),
+                    Some(file.path),
+                    416,
+                    0,
                     remote_addr,
                     user_agent,
                 );
@@ -751,24 +777,77 @@ fn handle_http_connection<S>(
 }
 
 struct FileResponse {
+    status: u16,
     content_type: String,
+    extra_headers: Vec<(String, String)>,
     body: Vec<u8>,
+}
+
+#[derive(Debug)]
+enum ReadFileError {
+    Io(std::io::Error),
+    UnsatisfiableRange { len: u64 },
+}
+
+impl std::fmt::Display for ReadFileError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "{error}"),
+            Self::UnsatisfiableRange { .. } => write!(formatter, "range not satisfiable"),
+        }
+    }
+}
+
+impl From<std::io::Error> for ReadFileError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
+    }
 }
 
 fn read_file_response(
     file: &serve_lib_core::ServeFilePlan,
-) -> Result<FileResponse, std::io::Error> {
+    range_header: Option<&str>,
+) -> Result<FileResponse, ReadFileError> {
+    let range = range_header.and_then(|range| parse_byte_range(range, file.len));
+    if file.render_mode == RenderMode::Raw {
+        if let Some(range) = range {
+            let mut input = fs::File::open(&file.path)?;
+            input.seek(SeekFrom::Start(range.start))?;
+            let mut body = vec![0; range.len() as usize];
+            input.read_exact(&mut body)?;
+            return Ok(FileResponse {
+                status: 206,
+                content_type: file.content_type.clone(),
+                extra_headers: vec![
+                    ("Accept-Ranges".to_string(), "bytes".to_string()),
+                    (
+                        "Content-Range".to_string(),
+                        format!("bytes {}-{}/{}", range.start, range.end, file.len),
+                    ),
+                ],
+                body,
+            });
+        }
+        if range_header.is_some() {
+            return Err(ReadFileError::UnsatisfiableRange { len: file.len });
+        }
+    }
+
     let body = fs::read(&file.path)?;
     match file.render_mode {
         RenderMode::Raw => Ok(FileResponse {
+            status: 200,
             content_type: file.content_type.clone(),
+            extra_headers: vec![("Accept-Ranges".to_string(), "bytes".to_string())],
             body,
         }),
         RenderMode::Markdown => {
             let source = String::from_utf8_lossy(&body);
             let html = render_markdown_page(&file.path.to_string_lossy(), &source);
             Ok(FileResponse {
+                status: 200,
                 content_type: "text/html; charset=utf-8".to_string(),
+                extra_headers: Vec::new(),
                 body: html.into_bytes(),
             })
         }
@@ -776,11 +855,57 @@ fn read_file_response(
             let source = String::from_utf8_lossy(&body);
             let html = render_code_page(&file.path.to_string_lossy(), &source);
             Ok(FileResponse {
+                status: 200,
                 content_type: "text/html; charset=utf-8".to_string(),
+                extra_headers: Vec::new(),
                 body: html.into_bytes(),
             })
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ByteRange {
+    start: u64,
+    end: u64,
+}
+
+impl ByteRange {
+    fn len(self) -> u64 {
+        self.end - self.start + 1
+    }
+}
+
+fn parse_byte_range(header: &str, len: u64) -> Option<ByteRange> {
+    if len == 0 {
+        return None;
+    }
+    let spec = header.strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    let (start, end) = spec.split_once('-')?;
+    if start.is_empty() {
+        let suffix_len = end.parse::<u64>().ok()?;
+        if suffix_len == 0 {
+            return None;
+        }
+        let start = len.saturating_sub(suffix_len);
+        return Some(ByteRange {
+            start,
+            end: len - 1,
+        });
+    }
+    let start = start.parse::<u64>().ok()?;
+    if start >= len {
+        return None;
+    }
+    let end = if end.is_empty() {
+        len - 1
+    } else {
+        end.parse::<u64>().ok()?.min(len - 1)
+    };
+    (start <= end).then_some(ByteRange { start, end })
 }
 
 fn render_markdown_page(title: &str, source: &str) -> String {
@@ -833,18 +958,35 @@ fn write_response(
     body: &[u8],
     head_only: bool,
 ) {
+    write_response_with_headers(stream, status, content_type, body, &[], head_only);
+}
+
+fn write_response_with_headers(
+    stream: &mut impl Write,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    extra_headers: &[(String, String)],
+    head_only: bool,
+) {
     let reason = match status {
         200 => "OK",
+        206 => "Partial Content",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        416 => "Range Not Satisfiable",
         500 => "Internal Server Error",
         _ => "OK",
     };
-    let header = format!(
+    let mut header = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
+    for (name, value) in extra_headers {
+        let insertion = header.len() - 2;
+        header.insert_str(insertion, &format!("{name}: {value}\r\n"));
+    }
     let _ = stream.write_all(header.as_bytes());
     if !head_only {
         let _ = stream.write_all(body);
@@ -921,12 +1063,7 @@ fn expire_routes(state: &Arc<Mutex<RuntimeState>>, events: &Arc<Mutex<EventLogSt
         let Ok(state) = state.lock() else {
             return;
         };
-        state
-            .registry
-            .mounts()
-            .filter(|mount| mount.expires_at.is_some_and(|expires_at| expires_at <= now))
-            .map(|mount| mount.id)
-            .collect::<Vec<_>>()
+        state.controller.expired_mount_ids(now)
     };
 
     if expired.is_empty() {
@@ -938,8 +1075,8 @@ fn expire_routes(state: &Arc<Mutex<RuntimeState>>, events: &Arc<Mutex<EventLogSt
         Err(_) => return,
     };
     for mount_id in expired {
-        if let Ok(removed) = state.registry.remove_by_id(mount_id) {
-            if state.registry.is_listener_empty(&removed.listener) {
+        if let Ok((removed, _)) = state.controller.remove_by_id(mount_id) {
+            if state.controller.is_listener_empty(&removed.listener) {
                 stop_listener(&mut state, &removed.listener);
             }
             let mut event = ServeEvent::lifecycle(
@@ -1142,6 +1279,37 @@ mod tests {
     }
 
     #[test]
+    fn state_generation_tracks_active_route_mutations() {
+        // Arrange
+        let temp = TempDir::new().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir(&app).unwrap();
+        fs::write(app.join("index.html"), "app").unwrap();
+        let runtime = DaemonRuntime::new(RuntimeOptions::default()).unwrap();
+        let port = free_port();
+
+        // Act
+        let initial = runtime.status().unwrap().generation;
+        runtime
+            .register(request(app, "/app", port), TlsPolicy::off())
+            .unwrap();
+        let after_register = runtime.status().unwrap().generation;
+        runtime
+            .deregister(DeregisterRequest {
+                bind: Some(BindTarget::Loopback),
+                port,
+                route: "/app".parse().unwrap(),
+            })
+            .unwrap();
+        let after_deregister = runtime.status().unwrap().generation;
+
+        // Assert
+        assert_eq!(initial, 0);
+        assert_eq!(after_register, 1);
+        assert_eq!(after_deregister, 2);
+    }
+
+    #[test]
     fn timeout_expires_route() {
         // Arrange
         let temp = TempDir::new().unwrap();
@@ -1161,6 +1329,7 @@ mod tests {
 
         // Assert
         assert!(runtime.list().unwrap().is_empty());
+        assert_eq!(runtime.status().unwrap().generation, 2);
         let events = runtime
             .events(EventQuery {
                 kind: Some(EventKind::RouteExpired),
@@ -1196,6 +1365,37 @@ mod tests {
         // Assert
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.ends_with("hello"));
+    }
+
+    #[test]
+    fn http_listener_serves_byte_range_for_mp4() {
+        // Arrange
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("clip.mp4"), "0123456789").unwrap();
+        let runtime = DaemonRuntime::new(RuntimeOptions::default()).unwrap();
+        let port = free_port();
+        runtime
+            .register(
+                request(temp.path().to_path_buf(), "/video", port),
+                TlsPolicy::off(),
+            )
+            .unwrap();
+        thread::sleep(Duration::from_millis(100));
+
+        // Act
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .write_all(b"GET /video/clip.mp4 HTTP/1.1\r\nHost: example\r\nRange: bytes=2-5\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+
+        // Assert
+        assert!(response.starts_with("HTTP/1.1 206 Partial Content"));
+        assert!(response.contains("Content-Type: video/mp4"));
+        assert!(response.contains("Accept-Ranges: bytes"));
+        assert!(response.contains("Content-Range: bytes 2-5/10"));
+        assert!(response.ends_with("2345"));
     }
 
     #[test]

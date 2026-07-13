@@ -27,6 +27,7 @@ This document describes the first implementation shape without locking the proje
 | Render Policy | Markdown/code rendering flags | file path resolution |
 | Control API | request/response protocol | business rules |
 | Daemon Runtime | lifecycle, task supervision | CLI formatting |
+| State Controller | authoritative active serving state and transitions | socket accept loops, filesystem reads |
 | Registry Manager | active mounts and route conflicts | socket I/O |
 | Timeout Scheduler | expiry timers | route matching |
 | Listener Manager | HTTP socket lifecycle | local config |
@@ -391,7 +392,7 @@ Error codes should include:
 
 ```text
 DaemonState {
-  registry: RegistryManager,
+  controller: StateController,
   listeners: ListenerManager,
   scheduler: TimeoutScheduler,
   event_log: EventLogStore,
@@ -399,7 +400,9 @@ DaemonState {
 }
 ```
 
-The daemon should use one state mutation path for register, deregister, and timeout expiry. That avoids inconsistent cleanup logic.
+The daemon should use one state mutation path for register, deregister, and
+timeout expiry. That path lives in the State Controller and avoids inconsistent
+cleanup logic.
 
 ### Lifecycle
 
@@ -420,11 +423,183 @@ Stop:
 4. Flush event log writes.
 5. Remove control socket.
 
+## State Controller Component
+
+### Responsibilities
+
+- Own the authoritative active serving state.
+- Validate state transitions for register, deregister, timeout expiry, and
+  daemon shutdown.
+- Keep route tables, listener policy tables, and timeout metadata consistent.
+- Produce immutable snapshots for listener request handlers.
+- Reconcile derived runtime resources after every successful mutation.
+- Append lifecycle events after transitions are committed.
+
+### Non-Responsibilities
+
+- Do not accept sockets.
+- Do not read files from served roots.
+- Do not parse CLI flags or local TOML config.
+- Do not treat SQLite event history as the active route registry.
+
+### Authoritative State
+
+```text
+StateController {
+  generation: u64,
+  mounts_by_id: Map<MountId, MountRecord>,
+  mounts_by_listener: Map<ListenerKey, RouteTable>,
+  listener_policies: Map<ListenerKey, TlsPolicy>
+}
+
+MountRecord {
+  mount: RouteMount,
+  state: MountLifecycle,
+  registered_at: SystemTime,
+  updated_at: SystemTime
+}
+
+MountLifecycle {
+  Requested,
+  Active,
+  Removing,
+  Expiring,
+  Removed,
+  Rejected,
+  Failed
+}
+```
+
+`Active` records are the only records used for request routing and `list`
+output. Terminal states can be dropped immediately from memory after the
+lifecycle event is written. Keeping the enum in the design still matters
+because transition logic should be explicit.
+
+### Derived State
+
+The following resources are derived from `StateController` and must be
+reconciled from it:
+
+```text
+listener sockets      <- active listener keys
+listener TLS acceptor <- listener_policies
+route snapshots       <- active mounts_by_listener
+timeout entries       <- active mounts with expires_at
+status output         <- generation + active mounts + running listeners
+```
+
+Derived resources may fail to start or stop. They must not independently
+invent active routes. If reconciliation fails, the controller either rolls back
+the mutation that caused the failure or marks affected mounts as `Failed` and
+reconciles again.
+
+### Transition API
+
+```text
+StateController.register(RegisterRequest, TlsPolicy) -> RegisterTransition
+StateController.deregister(DeregisterRequest) -> DeregisterTransition
+StateController.expire(MountId) -> ExpireTransition
+StateController.snapshot(listener_key) -> RouteSnapshot
+StateController.list() -> Vec<RouteMount>
+StateController.status() -> RuntimeStatus
+```
+
+Transition results should include enough information for collaborators:
+
+```text
+RegisterTransition {
+  generation: u64,
+  mount: RouteMount,
+  listener_action: ListenerAction,
+  timeout_action: TimeoutAction,
+  event: ServeEvent
+}
+
+ListenerAction {
+  None,
+  Start { key: ListenerKey, policy: TlsPolicy },
+  RefreshRoutes { key: ListenerKey },
+  Stop { key: ListenerKey }
+}
+
+TimeoutAction {
+  None,
+  Schedule { mount_id: MountId, expires_at: SystemTime },
+  Cancel { mount_id: MountId }
+}
+```
+
+The exact Rust names can change, but the behavior should stay: each mutation
+returns a small plan for listener, timeout, and event-log side effects.
+
+### Register Transition
+
+```text
+Requested
+  -> validate route, path, listener policy, conflict rules
+  -> insert Active mount
+  -> increment generation
+  -> return Start/RefreshRoutes and Schedule actions
+  -> append route_registered event after reconciliation succeeds
+```
+
+If listener startup fails for a new listener, registration must fail and the
+mount must not appear in active state. If refreshing an existing listener's
+route snapshot fails, the route insertion must roll back or become `Failed`
+before the control request returns.
+
+### Deregister Transition
+
+```text
+Active
+  -> Removing
+  -> remove from active route tables
+  -> increment generation
+  -> return RefreshRoutes or Stop and Cancel actions
+  -> append route_deregistered event
+```
+
+Manual deregistration and timeout expiry should share the same removal path.
+Only the lifecycle event kind differs.
+
+### Timeout Expiry Transition
+
+```text
+Active
+  -> Expiring
+  -> remove from active route tables
+  -> increment generation
+  -> return RefreshRoutes or Stop and Cancel actions
+  -> append route_expired event
+```
+
+The timeout scheduler should not mutate the registry directly. It should send
+`MountId` expiry requests to the state controller.
+
+### Snapshot Rules
+
+Request handlers should not hold the controller lock while reading files or
+writing HTTP responses. They should obtain an immutable `RouteSnapshot` for the
+listener key, then route the request from that snapshot.
+
+Each snapshot should carry the state generation:
+
+```text
+RouteSnapshot {
+  generation: u64,
+  listener: ListenerKey,
+  routes: RouteTable
+}
+```
+
+Access events can include the generation later if diagnostics need to explain
+which route table served a request.
+
 ## Registry Manager Component
 
 ### Responsibilities
 
-- Store active route mounts.
+- Store active route mounts for the state controller.
 - Validate route conflicts.
 - Provide lookup data to routers.
 - Support list and diagnostics.
@@ -489,7 +664,8 @@ TimeoutScheduler -> DaemonRuntime -> RegistryManager.remove(mount_id, reason=exp
                                 -> EventLog.record(expired)
 ```
 
-Manual deregistration should cancel pending expiry.
+Manual deregistration should cancel pending expiry through the timeout action
+returned by the state controller.
 
 ### Testing
 
@@ -515,10 +691,10 @@ ListenerKey {
 
 ### Reconciliation
 
-The listener manager should reconcile from desired state:
+The listener manager should reconcile from state-controller desired state:
 
 ```text
-desired listener keys = registry.listener_keys()
+desired listener keys = state_controller.active_listener_keys()
 actual listener keys = running listener tasks
 ```
 

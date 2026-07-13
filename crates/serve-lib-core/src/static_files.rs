@@ -193,6 +193,7 @@ fn content_type_for_path(path: &Path) -> &'static str {
         Some("jpeg" | "jpg") => "image/jpeg",
         Some("js" | "mjs") => "text/javascript; charset=utf-8",
         Some("json") => "application/json",
+        Some("m4v" | "mp4") => "video/mp4",
         Some("md" | "markdown") => "text/markdown; charset=utf-8",
         Some("png") => "image/png",
         Some("svg") => "image/svg+xml",
@@ -324,6 +325,20 @@ mod tests {
         };
         assert_eq!(file.len, 5);
         assert_eq!(file.content_type, "text/plain; charset=utf-8");
+    }
+
+    #[test]
+    fn serves_mp4_with_video_content_type() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("clip.mp4"), "fake mp4").unwrap();
+        let mount = mount(temp.path(), false);
+
+        let outcome = StaticFileService::plan(&mount, "clip.mp4");
+
+        let ServeOutcome::File(file) = outcome else {
+            panic!("expected file");
+        };
+        assert_eq!(file.content_type, "video/mp4");
     }
 
     #[test]
