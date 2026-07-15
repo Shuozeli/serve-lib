@@ -16,6 +16,7 @@ static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
 
 const HTTP_READ_BUFFER: usize = 8192;
+const FILE_STREAM_BUFFER: usize = 64 * 1024;
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -639,75 +640,68 @@ fn handle_http_connection<S>(
     };
 
     match StaticFileService::plan(&mount, &relative_path) {
-        ServeOutcome::File(file) => match read_file_response(&file, range.as_deref()) {
-            Ok(response) => {
-                let len = response.body.len() as u64;
-                write_response_with_headers(
-                    &mut stream,
-                    response.status,
-                    &response.content_type,
-                    &response.body,
-                    &response.extra_headers,
-                    method == "HEAD",
-                );
-                append_access_event(
-                    &events,
-                    EventKind::HttpAccessServed,
-                    method,
-                    path,
-                    Some(&mount),
-                    Some(file.path),
-                    response.status,
-                    len,
-                    remote_addr,
-                    user_agent,
-                );
+        ServeOutcome::File(file) => {
+            match serve_file_response(&mut stream, &file, range.as_deref(), method == "HEAD") {
+                Ok(served) => {
+                    append_access_event(
+                        &events,
+                        EventKind::HttpAccessServed,
+                        method,
+                        path,
+                        Some(&mount),
+                        Some(file.path),
+                        served.status,
+                        served.bytes_sent,
+                        remote_addr,
+                        user_agent,
+                    );
+                }
+                Err(ReadFileError::UnsatisfiableRange { len }) => {
+                    write_response_with_headers(
+                        &mut stream,
+                        416,
+                        "text/plain; charset=utf-8",
+                        b"range not satisfiable",
+                        &[("Content-Range".to_string(), format!("bytes */{len}"))],
+                        method == "HEAD",
+                    );
+                    append_access_event(
+                        &events,
+                        EventKind::HttpAccessDenied,
+                        method,
+                        path,
+                        Some(&mount),
+                        Some(file.path),
+                        416,
+                        0,
+                        remote_addr,
+                        user_agent,
+                    );
+                }
+                Err(error) => {
+                    let body = format!("read failed: {error}");
+                    write_response(
+                        &mut stream,
+                        500,
+                        "text/plain; charset=utf-8",
+                        body.as_bytes(),
+                        method == "HEAD",
+                    );
+                    append_access_event(
+                        &events,
+                        EventKind::HttpServeError,
+                        method,
+                        path,
+                        Some(&mount),
+                        None,
+                        500,
+                        0,
+                        remote_addr,
+                        user_agent,
+                    );
+                }
             }
-            Err(ReadFileError::UnsatisfiableRange { len }) => {
-                write_response_with_headers(
-                    &mut stream,
-                    416,
-                    "text/plain; charset=utf-8",
-                    b"range not satisfiable",
-                    &[("Content-Range".to_string(), format!("bytes */{len}"))],
-                    method == "HEAD",
-                );
-                append_access_event(
-                    &events,
-                    EventKind::HttpAccessDenied,
-                    method,
-                    path,
-                    Some(&mount),
-                    Some(file.path),
-                    416,
-                    0,
-                    remote_addr,
-                    user_agent,
-                );
-            }
-            Err(error) => {
-                let body = format!("read failed: {error}");
-                write_response(
-                    &mut stream,
-                    500,
-                    "text/plain; charset=utf-8",
-                    body.as_bytes(),
-                    method == "HEAD",
-                );
-                append_access_event(
-                    &events,
-                    EventKind::HttpServeError,
-                    method,
-                    path,
-                    Some(&mount),
-                    None,
-                    500,
-                    0,
-                    remote_addr,
-                    user_agent,
-                );
-            }
-        },
+        }
         ServeOutcome::DirectoryListing { entries, .. } => {
             let html = render_directory_listing(path, &entries);
             let len = html.len() as u64;
@@ -776,7 +770,12 @@ fn handle_http_connection<S>(
     }
 }
 
-struct FileResponse {
+struct ServedFile {
+    status: u16,
+    bytes_sent: u64,
+}
+
+struct MemoryFileResponse {
     status: u16,
     content_type: String,
     extra_headers: Vec<(String, String)>,
@@ -804,47 +803,82 @@ impl From<std::io::Error> for ReadFileError {
     }
 }
 
-fn read_file_response(
+fn serve_file_response(
+    stream: &mut impl Write,
     file: &serve_lib_core::ServeFilePlan,
     range_header: Option<&str>,
-) -> Result<FileResponse, ReadFileError> {
-    let range = range_header.and_then(|range| parse_byte_range(range, file.len));
+    head_only: bool,
+) -> Result<ServedFile, ReadFileError> {
     if file.render_mode == RenderMode::Raw {
-        if let Some(range) = range {
-            let mut input = fs::File::open(&file.path)?;
-            input.seek(SeekFrom::Start(range.start))?;
-            let mut body = vec![0; range.len() as usize];
-            input.read_exact(&mut body)?;
-            return Ok(FileResponse {
-                status: 206,
-                content_type: file.content_type.clone(),
-                extra_headers: vec![
-                    ("Accept-Ranges".to_string(), "bytes".to_string()),
-                    (
-                        "Content-Range".to_string(),
-                        format!("bytes {}-{}/{}", range.start, range.end, file.len),
-                    ),
-                ],
-                body,
-            });
-        }
-        if range_header.is_some() {
-            return Err(ReadFileError::UnsatisfiableRange { len: file.len });
-        }
+        return stream_raw_file_response(stream, file, range_header, head_only);
     }
 
+    let response = read_rendered_file_response(file)?;
+    let bytes_sent = response.body.len() as u64;
+    write_response_with_headers(
+        stream,
+        response.status,
+        &response.content_type,
+        &response.body,
+        &response.extra_headers,
+        head_only,
+    );
+    Ok(ServedFile {
+        status: response.status,
+        bytes_sent,
+    })
+}
+
+fn stream_raw_file_response(
+    stream: &mut impl Write,
+    file: &serve_lib_core::ServeFilePlan,
+    range_header: Option<&str>,
+    head_only: bool,
+) -> Result<ServedFile, ReadFileError> {
+    let range = range_header.and_then(|range| parse_byte_range(range, file.len));
+    if range_header.is_some() && range.is_none() {
+        return Err(ReadFileError::UnsatisfiableRange { len: file.len });
+    }
+
+    let status = if range.is_some() { 206 } else { 200 };
+    let start = range.map_or(0, |range| range.start);
+    let content_len = range.map_or(file.len, ByteRange::len);
+    let mut extra_headers = vec![("Accept-Ranges".to_string(), "bytes".to_string())];
+    if let Some(range) = range {
+        extra_headers.push((
+            "Content-Range".to_string(),
+            format!("bytes {}-{}/{}", range.start, range.end, file.len),
+        ));
+    }
+
+    let mut input = fs::File::open(&file.path)?;
+    input.seek(SeekFrom::Start(start))?;
+    write_response_header(
+        stream,
+        status,
+        &file.content_type,
+        content_len,
+        &extra_headers,
+    );
+    if !head_only {
+        copy_file_bytes(&mut input, stream, content_len)?;
+    }
+    Ok(ServedFile {
+        status,
+        bytes_sent: content_len,
+    })
+}
+
+fn read_rendered_file_response(
+    file: &serve_lib_core::ServeFilePlan,
+) -> Result<MemoryFileResponse, ReadFileError> {
     let body = fs::read(&file.path)?;
     match file.render_mode {
-        RenderMode::Raw => Ok(FileResponse {
-            status: 200,
-            content_type: file.content_type.clone(),
-            extra_headers: vec![("Accept-Ranges".to_string(), "bytes".to_string())],
-            body,
-        }),
+        RenderMode::Raw => unreachable!("raw files are streamed"),
         RenderMode::Markdown => {
             let source = String::from_utf8_lossy(&body);
             let html = render_markdown_page(&file.path.to_string_lossy(), &source);
-            Ok(FileResponse {
+            Ok(MemoryFileResponse {
                 status: 200,
                 content_type: "text/html; charset=utf-8".to_string(),
                 extra_headers: Vec::new(),
@@ -854,7 +888,7 @@ fn read_file_response(
         RenderMode::CodeHighlight => {
             let source = String::from_utf8_lossy(&body);
             let html = render_code_page(&file.path.to_string_lossy(), &source);
-            Ok(FileResponse {
+            Ok(MemoryFileResponse {
                 status: 200,
                 content_type: "text/html; charset=utf-8".to_string(),
                 extra_headers: Vec::new(),
@@ -862,6 +896,28 @@ fn read_file_response(
             })
         }
     }
+}
+
+fn copy_file_bytes(
+    input: &mut fs::File,
+    output: &mut impl Write,
+    mut remaining: u64,
+) -> Result<(), ReadFileError> {
+    let mut buffer = [0; FILE_STREAM_BUFFER];
+    while remaining > 0 {
+        let read_len = remaining.min(buffer.len() as u64) as usize;
+        let read = input.read(&mut buffer[..read_len])?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "file ended before declared content length",
+            )
+            .into());
+        }
+        output.write_all(&buffer[..read])?;
+        remaining -= read as u64;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -969,6 +1025,25 @@ fn write_response_with_headers(
     extra_headers: &[(String, String)],
     head_only: bool,
 ) {
+    write_response_header(
+        stream,
+        status,
+        content_type,
+        body.len() as u64,
+        extra_headers,
+    );
+    if !head_only {
+        let _ = stream.write_all(body);
+    }
+}
+
+fn write_response_header(
+    stream: &mut impl Write,
+    status: u16,
+    content_type: &str,
+    content_length: u64,
+    extra_headers: &[(String, String)],
+) {
     let reason = match status {
         200 => "OK",
         206 => "Partial Content",
@@ -980,17 +1055,13 @@ fn write_response_with_headers(
         _ => "OK",
     };
     let mut header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n",
     );
     for (name, value) in extra_headers {
         let insertion = header.len() - 2;
         header.insert_str(insertion, &format!("{name}: {value}\r\n"));
     }
     let _ = stream.write_all(header.as_bytes());
-    if !head_only {
-        let _ = stream.write_all(body);
-    }
 }
 
 fn render_directory_listing(path: &str, entries: &[serve_lib_core::DirectoryEntry]) -> String {

@@ -193,11 +193,16 @@ fn content_type_for_path(path: &Path) -> &'static str {
         Some("jpeg" | "jpg") => "image/jpeg",
         Some("js" | "mjs") => "text/javascript; charset=utf-8",
         Some("json") => "application/json",
+        Some("m4a") => "audio/mp4",
         Some("m4v" | "mp4") => "video/mp4",
         Some("md" | "markdown") => "text/markdown; charset=utf-8",
+        Some("mp3") => "audio/mpeg",
+        Some("ogg") => "audio/ogg",
         Some("png") => "image/png",
         Some("svg") => "image/svg+xml",
         Some("txt") => "text/plain; charset=utf-8",
+        Some("wav") => "audio/wav",
+        Some("webm") => "video/webm",
         Some("wasm") => "application/wasm",
         _ => "application/octet-stream",
     }
@@ -339,6 +344,20 @@ mod tests {
             panic!("expected file");
         };
         assert_eq!(file.content_type, "video/mp4");
+    }
+
+    #[test]
+    fn serves_mp3_with_audio_content_type() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("track.mp3"), "fake mp3").unwrap();
+        let mount = mount(temp.path(), false);
+
+        let outcome = StaticFileService::plan(&mount, "track.mp3");
+
+        let ServeOutcome::File(file) = outcome else {
+            panic!("expected file");
+        };
+        assert_eq!(file.content_type, "audio/mpeg");
     }
 
     #[test]
