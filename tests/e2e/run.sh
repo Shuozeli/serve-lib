@@ -267,8 +267,9 @@ test_timeout_expiry() {
 test_directory_listing_and_spa() {
   echo "== test: directory listing and SPA fallback =="
   local port="18090"
-  mkdir -p "${WORKDIR}/listing" "${WORKDIR}/spa"
+  mkdir -p "${WORKDIR}/listing/docs" "${WORKDIR}/spa"
   printf 'visible' >"${WORKDIR}/listing/visible.txt"
+  printf '# Guide' >"${WORKDIR}/listing/docs/guide.md"
   printf '<main>spa shell</main>' >"${WORKDIR}/spa/index.html"
 
   local listing_output spa_output
@@ -277,10 +278,12 @@ test_directory_listing_and_spa() {
   spa_output="$(register_route "${WORKDIR}/spa" --route /spa --port "${port}" --bind loopback --spa --index index.html)"
   assert_contains "${spa_output}" "registered /spa"
 
-  local listing_body spa_body
+  local listing_body docs_listing_body spa_body
   listing_body="$(wait_for_http "http://127.0.0.1:${port}/listing/")"
   assert_contains "${listing_body}" "Index of /listing/"
   assert_contains "${listing_body}" "visible.txt"
+  docs_listing_body="$(wait_for_http "http://127.0.0.1:${port}/listing/docs")"
+  assert_contains "${docs_listing_body}" "href=\"/listing/docs/guide.md\""
 
   spa_body="$(wait_for_http "http://127.0.0.1:${port}/spa/deep/link")"
   assert_contains "${spa_body}" "<main>spa shell</main>"

@@ -1065,6 +1065,7 @@ fn write_response_header(
 }
 
 fn render_directory_listing(path: &str, entries: &[serve_lib_core::DirectoryEntry]) -> String {
+    let base_path = directory_listing_base_path(path);
     let mut html =
         format!("<!doctype html><title>Index of {path}</title><h1>Index of {path}</h1><ul>");
     for entry in entries {
@@ -1073,16 +1074,40 @@ fn render_directory_listing(path: &str, entries: &[serve_lib_core::DirectoryEntr
         } else {
             ""
         };
+        let href = format!(
+            "{base_path}{}{suffix}",
+            percent_encode_path_segment(&entry.name)
+        );
         html.push_str(&format!(
-            "<li><a href=\"{}{}\">{}{}</a></li>",
-            html_escape(&entry.name),
-            suffix,
+            "<li><a href=\"{}\">{}{}</a></li>",
+            html_escape(&href),
             html_escape(&entry.name),
             suffix
         ));
     }
     html.push_str("</ul>");
     html
+}
+
+fn directory_listing_base_path(path: &str) -> String {
+    let path = path.split('?').next().unwrap_or(path);
+    if path == "/" {
+        return "/".to_string();
+    }
+    format!("{}/", path.trim_end_matches('/'))
+}
+
+fn percent_encode_path_segment(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }
 
 fn html_escape(value: &str) -> String {
@@ -1467,6 +1492,36 @@ mod tests {
         assert!(response.contains("Accept-Ranges: bytes"));
         assert!(response.contains("Content-Range: bytes 2-5/10"));
         assert!(response.ends_with("2345"));
+    }
+
+    #[test]
+    fn directory_listing_links_preserve_mounted_subpath() {
+        // Arrange
+        let temp = TempDir::new().unwrap();
+        let docs = temp.path().join("docs");
+        fs::create_dir(&docs).unwrap();
+        fs::write(docs.join("guide.md"), "# Guide").unwrap();
+        let runtime = DaemonRuntime::new(RuntimeOptions::default()).unwrap();
+        let port = free_port();
+        runtime
+            .register(
+                request(temp.path().to_path_buf(), "/share", port),
+                TlsPolicy::off(),
+            )
+            .unwrap();
+        thread::sleep(Duration::from_millis(100));
+
+        // Act
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .write_all(b"GET /share/docs HTTP/1.1\r\nHost: example\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+
+        // Assert
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("href=\"/share/docs/guide.md\""));
     }
 
     #[test]
