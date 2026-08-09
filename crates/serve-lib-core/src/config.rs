@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{BindTarget, DurationSpec, RenderConfig, ServeError};
+use crate::{BindTarget, DurationSpec, RenderConfig, ServeError, TlsMode, TlsPolicy};
 
 pub const DEFAULT_PORT: u16 = 8088;
 const SECS_PER_WEEK: u64 = 7 * 24 * 60 * 60;
@@ -100,6 +100,15 @@ impl LocalConfig {
                 .unwrap_or(false),
         };
 
+        let tls = resolve_tls_policy(
+            overrides.tls_mode,
+            overrides.server_cert,
+            overrides.server_key,
+            overrides.client_ca,
+            profile,
+            &self.defaults.tls,
+        )?;
+
         Ok(EffectiveRegisterDefaults {
             bind,
             port,
@@ -107,8 +116,45 @@ impl LocalConfig {
             index_file,
             spa,
             render,
+            tls,
         })
     }
+}
+
+/// Merge TLS material per-field (override > profile > defaults) into a single
+/// [`TlsPolicy`] and validate it. Validating the merged policy is the source of
+/// truth: an incomplete profile (e.g. `mode = "tls"` without a cert) surfaces a
+/// clear error at register time rather than silently falling back to plaintext.
+fn resolve_tls_policy(
+    override_mode: Option<TlsMode>,
+    override_cert: Option<PathBuf>,
+    override_key: Option<PathBuf>,
+    override_ca: Option<PathBuf>,
+    profile: Option<&ProfileConfig>,
+    defaults: &TlsConfigToml,
+) -> Result<TlsPolicy, ServeError> {
+    let mode = override_mode
+        .or_else(|| profile.and_then(|profile| profile.tls.mode))
+        .or(defaults.mode)
+        .unwrap_or(TlsMode::Off);
+    let server_cert = override_cert
+        .or_else(|| profile.and_then(|profile| profile.tls.server_cert.clone()))
+        .or_else(|| defaults.server_cert.clone());
+    let server_key = override_key
+        .or_else(|| profile.and_then(|profile| profile.tls.server_key.clone()))
+        .or_else(|| defaults.server_key.clone());
+    let client_ca = override_ca
+        .or_else(|| profile.and_then(|profile| profile.tls.client_ca.clone()))
+        .or_else(|| defaults.client_ca.clone());
+
+    let policy = TlsPolicy {
+        mode,
+        server_cert,
+        server_key,
+        client_ca,
+    };
+    policy.validate()?;
+    Ok(policy)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -119,6 +165,7 @@ pub struct DefaultConfig {
     pub timeout: Option<DurationSpec>,
     pub index: Option<String>,
     pub spa: Option<bool>,
+    pub tls: TlsConfigToml,
 }
 
 impl DefaultConfig {
@@ -131,6 +178,18 @@ impl DefaultConfig {
         }
         Ok(())
     }
+}
+
+/// Machine-local TLS/mTLS material for a listener. Cert paths live here (not in
+/// the public repo) exactly like [`DefaultConfig::bind`]. Fields are optional so
+/// a profile can inherit certs from `[defaults.tls]` and only override the mode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct TlsConfigToml {
+    pub mode: Option<TlsMode>,
+    pub server_cert: Option<PathBuf>,
+    pub server_key: Option<PathBuf>,
+    pub client_ca: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,6 +277,7 @@ pub struct ProfileConfig {
     pub index: Option<String>,
     pub spa: Option<bool>,
     pub render: RenderConfigToml,
+    pub tls: TlsConfigToml,
 }
 
 impl ProfileConfig {
@@ -246,6 +306,10 @@ pub struct RegisterOverride {
     pub spa: Option<bool>,
     pub render_markdown: Option<bool>,
     pub render_code_highlight: Option<bool>,
+    pub tls_mode: Option<TlsMode>,
+    pub server_cert: Option<PathBuf>,
+    pub server_key: Option<PathBuf>,
+    pub client_ca: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,6 +320,7 @@ pub struct EffectiveRegisterDefaults {
     pub index_file: String,
     pub spa: bool,
     pub render: RenderConfig,
+    pub tls: TlsPolicy,
 }
 
 fn validate_port(port: u16) -> Result<(), ServeError> {
@@ -386,5 +451,134 @@ mod tests {
         .unwrap();
 
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn resolves_mtls_policy_from_profile() {
+        // Arrange
+        let config = LocalConfig::from_toml_str(
+            r#"
+            [defaults.tls]
+            server_cert = "/etc/serve-lib/server.crt"
+            server_key = "/etc/serve-lib/server.key"
+
+            [[profiles]]
+            name = "secure"
+
+            [profiles.tls]
+            mode = "mtls"
+            client_ca = "/etc/serve-lib/client-ca.crt"
+            "#,
+        )
+        .unwrap();
+
+        // Act
+        let effective = config
+            .effective_register_defaults(Some("secure"), RegisterOverride::default())
+            .unwrap();
+
+        // Assert
+        assert_eq!(effective.tls.mode, TlsMode::Mtls);
+        assert_eq!(
+            effective.tls.server_cert.as_deref(),
+            Some(std::path::Path::new("/etc/serve-lib/server.crt"))
+        );
+        assert_eq!(
+            effective.tls.client_ca.as_deref(),
+            Some(std::path::Path::new("/etc/serve-lib/client-ca.crt"))
+        );
+        assert_eq!(effective.tls.scheme(), "https");
+    }
+
+    #[test]
+    fn cli_override_wins_over_profile_tls_mode() {
+        // Arrange
+        let config = LocalConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "secure"
+
+            [profiles.tls]
+            mode = "mtls"
+            server_cert = "/etc/serve-lib/server.crt"
+            server_key = "/etc/serve-lib/server.key"
+            client_ca = "/etc/serve-lib/client-ca.crt"
+            "#,
+        )
+        .unwrap();
+
+        // Act
+        let effective = config
+            .effective_register_defaults(
+                Some("secure"),
+                RegisterOverride {
+                    tls_mode: Some(TlsMode::Off),
+                    ..RegisterOverride::default()
+                },
+            )
+            .unwrap();
+
+        // Assert
+        assert_eq!(effective.tls.mode, TlsMode::Off);
+        assert_eq!(effective.tls.scheme(), "http");
+    }
+
+    #[test]
+    fn rejects_tls_profile_without_certificate() {
+        // Arrange
+        let config = LocalConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "broken"
+
+            [profiles.tls]
+            mode = "tls"
+            "#,
+        )
+        .unwrap();
+
+        // Act
+        let error = config
+            .effective_register_defaults(Some("broken"), RegisterOverride::default())
+            .unwrap_err();
+
+        // Assert
+        assert_eq!(error.code(), crate::ErrorCode::InvalidConfig);
+    }
+
+    #[test]
+    fn rejects_relative_tls_certificate_path() {
+        // Arrange
+        let config = LocalConfig::from_toml_str(
+            r#"
+            [defaults.tls]
+            mode = "tls"
+            server_cert = "relative/server.crt"
+            server_key = "/etc/serve-lib/server.key"
+            "#,
+        )
+        .unwrap();
+
+        // Act
+        let error = config
+            .effective_register_defaults(None, RegisterOverride::default())
+            .unwrap_err();
+
+        // Assert
+        assert_eq!(error.code(), crate::ErrorCode::InvalidConfig);
+    }
+
+    #[test]
+    fn defaults_to_off_when_no_tls_configured() {
+        // Arrange
+        let config = LocalConfig::default();
+
+        // Act
+        let effective = config
+            .effective_register_defaults(None, RegisterOverride::default())
+            .unwrap();
+
+        // Assert
+        assert_eq!(effective.tls.mode, TlsMode::Off);
     }
 }

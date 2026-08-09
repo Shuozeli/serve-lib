@@ -30,6 +30,10 @@
 - Added bind resolver unit tests using fake Tailscale command output and fake network candidates.
 - Added codelabs for human usage flows, current runtime verification, experimental CLI behavior, and agent continuation workflow.
 - Added daemon runtime tests for multi-route listeners, HTTP serving, timeout expiry, TLS serving, mTLS serving, and mTLS client-cert rejection.
+- Defined the `[defaults.tls]` / `[profiles.tls]` TLS/mTLS profile schema and merged it (CLI override > profile > defaults) into a validated `TlsPolicy` in `effective_register_defaults`.
+- Made `--tls-mode` optional so config-supplied TLS is used when no flag is passed.
+- Added config tests for TLS profile resolution and validation (mTLS from profile, CLI override precedence, missing-cert rejection, relative-path rejection, off default).
+- Added README docs/examples for config-based TLS profiles and curl/browser access to TLS and mTLS listeners.
 
 ## Pending
 
@@ -37,14 +41,11 @@
 - Review and tighten [design.md](design.md).
 - Review and tighten [implementation-plan.md](implementation-plan.md).
 - Add config mutation helpers.
-- Define TLS/mTLS profile schema and listener policy model.
 - Add config commands for showing and setting defaults.
 - Add config commands for event log retention and cleanup interval.
 - Add config commands for TLS/mTLS profiles.
 - Integrate Tailscale IP and MagicDNS detection into daemon registration flow.
 - Wire real runtime network-interface discovery into bind resolver config.
-- Add CLI docs/examples for curl/browser access to TLS and mTLS listeners.
-- Add tests for TLS profile validation.
 - Add tests proving machine-specific MagicDNS/private IP values are not required in repo defaults.
 
 ## Design Checklist

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use clap::{ArgAction, Parser, Subcommand};
 use serve_lib_core::{
     BindTarget, DeregisterRequest, DurationSpec, EventLogDatabasePath, LocalConfig,
-    RegisterOverride, RegisterRequest, TlsMode, TlsPolicy, DEFAULT_PORT,
+    RegisterOverride, RegisterRequest, TlsMode, DEFAULT_PORT,
 };
 use serve_lib_daemon::{
     run_control_server, ControlClient, ControlRequest, ControlResponse, DaemonRuntime,
@@ -60,8 +60,8 @@ enum Commands {
         #[arg(long)]
         name: Option<String>,
 
-        #[arg(long, default_value = "off")]
-        tls_mode: String,
+        #[arg(long)]
+        tls_mode: Option<String>,
 
         #[arg(long)]
         server_cert: Option<PathBuf>,
@@ -131,6 +131,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         .transpose()?,
                     index_file: index,
                     spa: spa.then_some(true),
+                    tls_mode: tls_mode.as_deref().map(parse_tls_mode).transpose()?,
+                    server_cert,
+                    server_key,
+                    client_ca,
                     ..RegisterOverride::default()
                 },
             )?;
@@ -146,12 +150,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 readonly: true,
                 display_name: name,
             };
-            let tls_policy = TlsPolicy {
-                mode: parse_tls_mode(&tls_mode)?,
-                server_cert,
-                server_key,
-                client_ca,
-            };
+            let tls_policy = effective.tls;
             let client = ControlClient::new(cli.control);
             print_response(client.post(
                 "/register",
