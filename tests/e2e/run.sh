@@ -422,7 +422,8 @@ test_rendering_config() {
 
   local code_body
   code_body="$(wait_for_http "http://127.0.0.1:18095/rendered/app.js")"
-  assert_contains "${code_body}" "<html>"
+  assert_contains "${code_body}" '<html lang="en">'
+  assert_contains "${code_body}" 'name="viewport"'
   assert_contains "${code_body}" "const"
   assert_contains "${code_body}" "console"
 }

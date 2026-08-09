@@ -19,6 +19,27 @@ const HTTP_READ_BUFFER: usize = 8192;
 const FILE_STREAM_BUFFER: usize = 64 * 1024;
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
+/// Mobile-first stylesheet for rendered Markdown and highlighted source pages.
+/// Fluid padding, constrained media, and horizontally scrollable code/tables
+/// keep long content from forcing the whole page wider than the viewport.
+const HTML_SHELL_STYLE: &str = "\
+*{box-sizing:border-box}\
+html{-webkit-text-size-adjust:100%}\
+body{margin:0;background:#f7f7f5;color:#1d1d1f;font:16px/1.6 system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overflow-wrap:break-word}\
+main{max-width:920px;margin:0 auto;padding:clamp(16px,4vw,32px)}\
+img,video,canvas,svg{max-width:100%;height:auto}\
+h1,h2,h3{line-height:1.25}\
+pre{overflow-x:auto;padding:16px;border-radius:8px;background:#111;color:#f8f8f2;-webkit-overflow-scrolling:touch}\
+pre code{white-space:pre}\
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.95em}\
+:not(pre)>code{background:rgba(0,0,0,.06);padding:.15em .35em;border-radius:4px}\
+a{color:#075985}\
+ul{padding-left:1.2em}\
+li{margin:.35em 0}\
+table{width:100%;border-collapse:collapse;display:block;overflow-x:auto}\
+th,td{border:1px solid #d0d0d0;padding:6px 10px}\
+blockquote{margin:0;padding:.2em 1em;border-left:4px solid #d0d0d0;color:#555}";
+
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig, ServerConnection, StreamOwned};
@@ -1000,9 +1021,9 @@ fn render_code_page(title: &str, source: &str) -> String {
 
 fn render_html_shell(title: &str, body: &str) -> String {
     format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{}</title><style>{}</style></head><body><main>{}</main></body></html>",
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{}</title><style>{}</style></head><body><main>{}</main></body></html>",
         html_escape(title),
-        "body{margin:0;background:#f7f7f5;color:#1d1d1f;font:16px/1.55 system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}main{max-width:920px;margin:0 auto;padding:32px}pre{overflow:auto;padding:16px;border-radius:8px;background:#111;color:#f8f8f2}code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}a{color:#075985}",
+        HTML_SHELL_STYLE,
         body
     )
 }
@@ -1066,8 +1087,8 @@ fn write_response_header(
 
 fn render_directory_listing(path: &str, entries: &[serve_lib_core::DirectoryEntry]) -> String {
     let base_path = directory_listing_base_path(path);
-    let mut html =
-        format!("<!doctype html><title>Index of {path}</title><h1>Index of {path}</h1><ul>");
+    let title = format!("Index of {path}");
+    let mut body = format!("<h1>Index of {}</h1><ul>", html_escape(path));
     for entry in entries {
         let suffix = if entry.kind == DirectoryEntryKind::Directory {
             "/"
@@ -1078,15 +1099,15 @@ fn render_directory_listing(path: &str, entries: &[serve_lib_core::DirectoryEntr
             "{base_path}{}{suffix}",
             percent_encode_path_segment(&entry.name)
         );
-        html.push_str(&format!(
+        body.push_str(&format!(
             "<li><a href=\"{}\">{}{}</a></li>",
             html_escape(&href),
             html_escape(&entry.name),
             suffix
         ));
     }
-    html.push_str("</ul>");
-    html
+    body.push_str("</ul>");
+    render_html_shell(&title, &body)
 }
 
 fn directory_listing_base_path(path: &str) -> String {
@@ -1349,6 +1370,21 @@ mod tests {
     }
 
     #[test]
+    fn rendered_markdown_is_mobile_friendly() {
+        // Arrange
+        let source = "# Title\n\nsome **body** text";
+
+        // Act
+        let html = render_markdown_page("guide.md", source);
+
+        // Assert
+        assert!(html
+            .contains("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"));
+        assert!(html.contains("<h1>Title</h1>"));
+        assert!(html.contains("max-width:100%"));
+    }
+
+    #[test]
     fn registers_two_routes_on_one_listener() {
         // Arrange
         let temp = TempDir::new().unwrap();
@@ -1522,6 +1558,8 @@ mod tests {
         // Assert
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("href=\"/share/docs/guide.md\""));
+        assert!(response
+            .contains("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"));
     }
 
     #[test]
