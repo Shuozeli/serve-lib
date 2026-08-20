@@ -111,6 +111,53 @@ Stop:
 target/release/serve-lib --control 127.0.0.1:7878 daemon stop
 ```
 
+## Authoring Pages Served Under A Sub-Path
+
+This section is for agents that **produce the content** served by `serve-lib`
+(writing an `index.html` and its assets), not just those modifying the crate.
+
+`serve-lib` mounts each site under a registered route prefix (for example
+`/app`), so the page is reached at `http://host:port/app/`. The prefix is chosen
+at **registration time**, not build time. The common failure: a page written as
+if it were served from the origin root.
+
+**Rule: use relative asset URLs, never root-absolute ones.**
+
+- Good (resolves under the mount): `<img src="logo.png">`,
+  `<script src="assets/app.js">`, `<link href="./style.css">`,
+  `fetch("api/data.json")`.
+- Bad (resolves against the origin root, misses the mount):
+  `<img src="/logo.png">`, `<script src="/assets/app.js">`,
+  `<link href="/style.css">`, `fetch("/api/data.json")`, CSS `url(/bg.png)`.
+
+Root-absolute URLs like `/assets/app.js` are requested from the browser as
+`http://host:port/assets/app.js` — the `/app` prefix is dropped — so they land
+on no mount and 404.
+
+Checklist when writing a page for `serve-lib`:
+
+1. Make every `src`, `href`, `srcset`, `poster`, form `action`, CSS `url(...)`,
+   and `fetch`/`import` path **relative** (no leading `/`).
+2. Do not hardcode the mount prefix into paths either — relative paths keep the
+   site portable across whatever route it is registered under.
+3. If the site is produced by a bundler and you must keep absolute paths, build
+   it with the sub-path baked in instead: Vite `base: '/app/'`, CRA `homepage`,
+   webpack `output.publicPath`, Next.js `basePath`. This is the only robust way
+   to fix absolute URLs that a bundler emits for code-split JS chunks.
+4. The trailing slash is handled for you: a request to the mount root without
+   one (`/app`) receives a `301` redirect to `/app/`, so relative URLs resolve
+   against `/app/` and not the origin root. You therefore do not need a `<base>`
+   tag for the trailing-slash case. (A `<base>` still does **not** rescue
+   root-absolute URLs — only relative paths or a correct build base do.)
+
+**Safety net (do not rely on it):** the daemon recovers root-absolute asset
+requests via the `Referer` header — when `/assets/app.js` misses, it re-resolves
+the request against the mount of the referring page. This transparently rescues
+absolute HTML/CSS/JS references in most browsers, but it fails when the site
+sends a strict `Referrer-Policy` (e.g. `no-referrer`) or when there is no
+referring page. Relative paths remain the requirement; the fallback only reduces
+breakage, it does not license absolute paths.
+
 ## Rendering Notes
 
 Markdown and source rendering are disabled unless config enables them.

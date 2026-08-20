@@ -596,6 +596,11 @@ fn handle_http_connection<S>(
         name.eq_ignore_ascii_case("Range")
             .then(|| value.trim().to_string())
     });
+    let referer = request.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("Referer")
+            .then(|| value.trim().to_string())
+    });
 
     if method != "GET" && method != "HEAD" {
         write_response(
@@ -635,9 +640,13 @@ fn handle_http_connection<S>(
             .controller
             .match_request(&listener, path)
             .map(|matched| (matched.mount.clone(), matched.relative_path))
+            // A root-absolute asset URL (e.g. `/assets/app.js`) requested from a
+            // page served under a sub-path mount misses every route. Recover the
+            // intended mount from the `Referer` header before giving up.
+            .or_else(|| resolve_via_referer(&state.controller, &listener, path, referer.as_deref()))
     };
 
-    let Some((mount, relative_path)) = matched else {
+    let Some((mut mount, relative_path)) = matched else {
         write_response(
             &mut stream,
             404,
@@ -660,7 +669,61 @@ fn handle_http_connection<S>(
         return;
     };
 
-    match StaticFileService::plan(&mount, &relative_path) {
+    // A request that hits a non-root mount root without a trailing slash (e.g.
+    // `/app` for route `/app`) must redirect to `/app/`. Browsers resolve the
+    // page's relative URLs against the document URL, so without the trailing
+    // slash a relative `logo.png` would resolve to `/logo.png` and miss the
+    // mount. The 301 makes relative-path sites work regardless of entry URL.
+    let path_only = path.split('?').next().unwrap_or(path);
+    if relative_path.is_empty() && !mount.route.is_root() && path_only == mount.route.as_str() {
+        let location = match path.split_once('?') {
+            Some((_, query)) => format!("{}/?{}", mount.route.as_str(), query),
+            None => format!("{}/", mount.route.as_str()),
+        };
+        write_response_with_headers(
+            &mut stream,
+            301,
+            "text/plain; charset=utf-8",
+            b"",
+            &[("Location".to_string(), location)],
+            method == "HEAD",
+        );
+        append_access_event(
+            &events,
+            EventKind::HttpAccessServed,
+            method,
+            path,
+            Some(&mount),
+            None,
+            301,
+            0,
+            remote_addr,
+            user_agent,
+        );
+        return;
+    }
+
+    let mut outcome = StaticFileService::plan(&mount, &relative_path);
+    // The path matched a mount but the file is missing. It may be a root-absolute
+    // asset belonging to the referring page's mount rather than this one; retry
+    // the resolution via the `Referer` header before returning 404.
+    if matches!(outcome, ServeOutcome::NotFound { .. }) {
+        let alternative = match state.lock() {
+            Ok(state) => {
+                resolve_via_referer(&state.controller, &listener, path, referer.as_deref())
+            }
+            Err(_) => None,
+        };
+        if let Some((alt_mount, alt_relative)) = alternative {
+            let alt_outcome = StaticFileService::plan(&alt_mount, &alt_relative);
+            if matches!(alt_outcome, ServeOutcome::File(_)) {
+                mount = alt_mount;
+                outcome = alt_outcome;
+            }
+        }
+    }
+
+    match outcome {
         ServeOutcome::File(file) => {
             match serve_file_response(&mut stream, &file, range.as_deref(), method == "HEAD") {
                 Ok(served) => {
@@ -788,6 +851,69 @@ fn handle_http_connection<S>(
                 user_agent,
             );
         }
+    }
+}
+
+/// Recover the mount for a root-absolute asset request from the `Referer`
+/// header.
+///
+/// When a page is served under a sub-path mount (e.g. `/app/`), root-absolute
+/// URLs in its markup (`<img src="/logo.png">`, `fetch("/api")`, CSS `url(/…)`)
+/// resolve against the origin root, not the mount prefix, so requests like
+/// `/logo.png` miss every route. The sub-resource request still carries a
+/// `Referer` pointing at the page (`…/app/index.html`), so we locate the mount
+/// that owns that page and re-issue the lookup as `{mount.route}/{request_path}`
+/// through the normal, traversal-safe resolution pipeline.
+///
+/// Returns the recovered mount and its validated relative path, or `None` when
+/// there is no usable `Referer`, the referring page maps to no mount, or the
+/// remapped path is rejected.
+fn resolve_via_referer(
+    controller: &StateController,
+    listener: &ListenerKey,
+    request_path: &str,
+    referer: Option<&str>,
+) -> Option<(RouteMount, String)> {
+    let referer_path = referer_path(referer?)?;
+    let owner = controller.match_request(listener, &referer_path)?;
+    let route = owner.mount.route.as_str();
+    let remapped = format!(
+        "{}/{}",
+        route.trim_end_matches('/'),
+        request_path.trim_start_matches('/')
+    );
+    let matched = owner.mount.route.matches_request_path(&remapped)?;
+    Some((owner.mount.clone(), matched.relative_path))
+}
+
+/// Extract the path component of a `Referer` header value.
+///
+/// The value is normally an absolute URL (`http://host:8088/app/index.html`);
+/// some referrer policies send a path-only value. Query and fragment are
+/// stripped. Returns `None` only for an empty value.
+fn referer_path(referer: &str) -> Option<String> {
+    let referer = referer.trim();
+    if referer.is_empty() {
+        return None;
+    }
+    let after_authority = match referer.find("://") {
+        Some(scheme_end) => {
+            let rest = &referer[scheme_end + 3..];
+            match rest.find('/') {
+                Some(path_start) => &rest[path_start..],
+                None => "/",
+            }
+        }
+        None => referer,
+    };
+    let path = after_authority
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(after_authority);
+    if path.is_empty() {
+        Some("/".to_string())
+    } else {
+        Some(path.to_string())
     }
 }
 
@@ -1068,6 +1194,7 @@ fn write_response_header(
     let reason = match status {
         200 => "OK",
         206 => "Partial Content",
+        301 => "Moved Permanently",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
@@ -1497,6 +1624,145 @@ mod tests {
         // Assert
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.ends_with("hello"));
+    }
+
+    #[test]
+    fn http_listener_redirects_mount_root_without_trailing_slash() {
+        // Arrange
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("index.html"), "<html></html>").unwrap();
+        let runtime = DaemonRuntime::new(RuntimeOptions::default()).unwrap();
+        let port = free_port();
+        runtime
+            .register(
+                request(temp.path().to_path_buf(), "/app", port),
+                TlsPolicy::off(),
+            )
+            .unwrap();
+        thread::sleep(Duration::from_millis(100));
+
+        // Act: hit the mount root without a trailing slash.
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .write_all(b"GET /app?tab=1 HTTP/1.1\r\nHost: example\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+
+        // Assert: 301 to the slash-terminated form, query preserved.
+        assert!(response.starts_with("HTTP/1.1 301 Moved Permanently"));
+        assert!(response.contains("Location: /app/?tab=1\r\n"));
+    }
+
+    #[test]
+    fn http_listener_serves_mount_root_with_trailing_slash() {
+        // Arrange
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("index.html"), "<h1>home</h1>").unwrap();
+        let runtime = DaemonRuntime::new(RuntimeOptions::default()).unwrap();
+        let port = free_port();
+        runtime
+            .register(
+                request(temp.path().to_path_buf(), "/app", port),
+                TlsPolicy::off(),
+            )
+            .unwrap();
+        thread::sleep(Duration::from_millis(100));
+
+        // Act: the trailing-slash form serves the index without redirecting.
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .write_all(b"GET /app/ HTTP/1.1\r\nHost: example\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+
+        // Assert
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.ends_with("<h1>home</h1>"));
+    }
+
+    #[test]
+    fn http_listener_recovers_root_absolute_asset_via_referer() {
+        // Arrange
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("assets")).unwrap();
+        fs::write(temp.path().join("index.html"), "<html></html>").unwrap();
+        fs::write(temp.path().join("assets/app.js"), "console.log(1)").unwrap();
+        let runtime = DaemonRuntime::new(RuntimeOptions::default()).unwrap();
+        let port = free_port();
+        runtime
+            .register(
+                request(temp.path().to_path_buf(), "/app", port),
+                TlsPolicy::off(),
+            )
+            .unwrap();
+        thread::sleep(Duration::from_millis(100));
+
+        // Act: the page lives at /app/, but its markup requested /assets/app.js
+        // (root-absolute). The browser sends the page as the Referer.
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .write_all(
+                format!(
+                    "GET /assets/app.js HTTP/1.1\r\nHost: example\r\n\
+                     Referer: http://example:{port}/app/index.html\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+
+        // Assert
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("text/javascript"));
+        assert!(response.ends_with("console.log(1)"));
+    }
+
+    #[test]
+    fn http_listener_returns_404_for_root_absolute_asset_without_referer() {
+        // Arrange
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("assets")).unwrap();
+        fs::write(temp.path().join("assets/app.js"), "console.log(1)").unwrap();
+        let runtime = DaemonRuntime::new(RuntimeOptions::default()).unwrap();
+        let port = free_port();
+        runtime
+            .register(
+                request(temp.path().to_path_buf(), "/app", port),
+                TlsPolicy::off(),
+            )
+            .unwrap();
+        thread::sleep(Duration::from_millis(100));
+
+        // Act: no Referer — the request cannot be attributed to any mount.
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .write_all(b"GET /assets/app.js HTTP/1.1\r\nHost: example\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+
+        // Assert
+        assert!(response.starts_with("HTTP/1.1 404"));
+    }
+
+    #[test]
+    fn referer_path_extracts_path_from_absolute_url() {
+        // Arrange / Act / Assert
+        assert_eq!(
+            referer_path("http://host:8088/app/index.html").as_deref(),
+            Some("/app/index.html")
+        );
+        assert_eq!(
+            referer_path("https://host/app/?tab=1#frag").as_deref(),
+            Some("/app/")
+        );
+        assert_eq!(referer_path("http://host").as_deref(), Some("/"));
+        // Path-only value (some referrer policies).
+        assert_eq!(referer_path("/app/page").as_deref(), Some("/app/page"));
+        assert_eq!(referer_path("   ").as_deref(), None);
     }
 
     #[test]
